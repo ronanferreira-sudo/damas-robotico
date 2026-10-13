@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from xadrez_robotico.vision.calibration import Calibration
+from damas.vision.calibration import Calibration
 
 
 def main() -> int:

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from xadrez_robotico.dobot.usb_client import USBClient
+from damas.dobot.usb_client import USBClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("test_wrapper")

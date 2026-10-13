@@ -1,11 +1,11 @@
 [project]
-name = "xadrez-robotico"
+name = "damas"
 version = "0.1.0"
-description = "Sistema de xadrez jogado por I.A. com dois bracos roboticos Dobot Magician Lite e visao computacional."
+description = "Sistema de damas jogado por I.A. com dois bracos roboticos Dobot Magician Lite e visao computacional."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "python-chess>=1.999",
+    "pydraughts>=0.6.7",
     "opencv-python>=4.7",
     "numpy>=1.24",
     "pyyaml>=6.0",
@@ -20,7 +20,7 @@ dependencies = [
 dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.0"]
 
 [project.scripts]
-xadrez = "xadrez_robotico.cli:main"
+damas = "damas.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

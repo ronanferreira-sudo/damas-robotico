@@ -83,7 +83,7 @@ def test_config():
 def test_board_state():
     cat = "BoardState (Damas)"
     try:
-        from xadrez_robotico.chess.board_state import BoardState
+        from damas.draughts.board_state import BoardState
 
         bs = BoardState()
         log_test(cat, "Inicialização do BoardState", True, f"Variante: {bs.board.variant}")
@@ -144,8 +144,8 @@ def test_board_state():
 def test_engine():
     cat = "Motor de IA (Minimax)"
     try:
-        from xadrez_robotico.chess.board_state import BoardState
-        from xadrez_robotico.chess.engine import choose_move, _evaluate
+        from damas.draughts.board_state import BoardState
+        from damas.draughts.engine import choose_move, _evaluate
 
         bs = BoardState()
         # Testar função de avaliação
@@ -182,7 +182,7 @@ def test_engine():
 def test_plan_actions():
     cat = "Planejamento Físico (plan_actions)"
     try:
-        from xadrez_robotico.game.match import plan_actions
+        from damas.game.match import plan_actions
 
         # Cenário 1: Movimento simples (sem captura)
         # Brancas movem c3 -> d4
@@ -230,7 +230,7 @@ def test_match_simulation(cfg):
     cat = "Simulação de Partida (Match)"
     try:
         import asyncio
-        from xadrez_robotico.game import Match
+        from damas.game import Match
 
         sim_cfg = dict(cfg)
         sim_cfg["mode"] = "simulation"
@@ -269,7 +269,7 @@ def test_match_simulation(cfg):
 def test_kinematics(cfg):
     cat = "Cinemática (BoardToRobot)"
     try:
-        from xadrez_robotico.robot.kinematics import BoardToRobot
+        from damas.robot.kinematics import BoardToRobot
 
         # Testar com square_overrides
         sample_overrides = {
@@ -322,14 +322,14 @@ def test_kinematics(cfg):
 def test_vision():
     cat = "Visão Computacional"
     try:
-        from xadrez_robotico.vision.calibration import Calibration
+        from damas.vision.calibration import Calibration
         calib = Calibration.build_from_corners((50, 50), (50, 400), (400, 50), (400, 400), roi_size=32)
         if len(calib.square_centers) == 64:
             log_test(cat, "Geração de matriz de calibração", True, "64 centros de casas calculados")
         else:
             log_test(cat, "Geração de matriz de calibração", False, f"Centros: {len(calib.square_centers)}")
 
-        from xadrez_robotico.vision.detector import BoardDetector
+        from damas.vision.detector import BoardDetector
         detector = BoardDetector(calib, {"occupancy_threshold": 0.20, "method": "template"})
         log_test(cat, "Inicialização do BoardDetector", True)
 

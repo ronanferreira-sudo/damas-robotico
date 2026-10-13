@@ -15,13 +15,11 @@ logger = logging.getLogger(__name__)
 
 def _evaluate(board: draughts.Board) -> float:
     if board.is_over():
-        if board.is_draw():
+        if board.winner is None:
             return 0.0
-        # If white won and we evaluate for white, it's positive.
         if board.winner == draughts.WHITE:
             return 10000.0
-        else:
-            return -10000.0
+        return -10000.0
 
     score = 0.0
     for pos in board._game.board.searcher.filled_positions:

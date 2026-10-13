@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Mapping, Any
 
-from ..chess.board_state import BoardState
-from ..chess.engine import choose_move
+from ..draughts.board_state import BoardState
+from ..draughts.engine import choose_move
 
 logger = logging.getLogger(__name__)
 

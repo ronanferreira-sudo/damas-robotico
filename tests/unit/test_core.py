@@ -1,6 +1,6 @@
-from xadrez_robotico.chess import BoardState, choose_move
-from xadrez_robotico.game import plan_actions
-from xadrez_robotico.robot.kinematics import BoardToRobot, grid_squares
+from damas.draughts import BoardState, choose_move
+from damas.game import plan_actions
+from damas.robot.kinematics import BoardToRobot, grid_squares
 
 
 def test_choose_move_legal_from_start():

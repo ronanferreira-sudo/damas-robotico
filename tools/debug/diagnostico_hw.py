@@ -1,4 +1,4 @@
-"""Diagnostico completo do sistema Xadrez Robotico.
+"""Diagnostico completo do sistema Damas Robotico.
 
 Verifica:
   - Portas seriais / bracos Dobot
@@ -103,7 +103,7 @@ def check_calibration() -> None:
 
     try:
         sys.path.insert(0, str(ROOT / "src"))
-        from xadrez_robotico.vision.calibration import Calibration
+        from damas.vision.calibration import Calibration
         calib = Calibration.load(str(calib_path))
         n = len(calib.square_centers)
         print(f"  [OK] {calib_path.name} -- {n}/64 quadrados calibrados, ROI={calib.roi_size}px")
@@ -124,13 +124,13 @@ def check_calibration() -> None:
 # --- Relatorio final -----------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Diagnostico do Xadrez Robotico")
+    parser = argparse.ArgumentParser(description="Diagnostico do Damas Robotico")
     parser.add_argument("--no-camera-preview", action="store_true",
                         help="Nao salva previews de camera")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  DIAGNOSTICO -- Xadrez Robotico")
+    print("  DIAGNOSTICO -- Damas Robotico")
     print("=" * 60)
 
     cameras = check_cameras(save_preview=not args.no_camera_preview)
@@ -170,7 +170,7 @@ def main() -> int:
     print("\n  Para testar movimento dos bracos:")
     print("    .venv\\Scripts\\python.exe tools\\test_arms.py --move")
     print("\n  Para rodar a partida em hardware:")
-    print("    .venv\\Scripts\\python.exe -m xadrez_robotico.cli play --mode hardware --calibration config/calibration.yaml")
+    print("    .venv\\Scripts\\python.exe -m damas.cli play --mode hardware --calibration config/calibration.yaml")
     print()
     return 0
 

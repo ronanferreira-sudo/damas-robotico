@@ -18,8 +18,10 @@ Uso:
 from __future__ import annotations
 
 import math
+import os
 import struct
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -175,8 +177,12 @@ class DraughtsCalibrationGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Calibração das 32 Casas de Damas - Dobot Magician Lite")
-        self.geometry("1080x760")
-        self.minsize(980, 700)
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        window_width = min(1080, max(900, screen_width - 40))
+        window_height = min(760, max(600, screen_height - 100))
+        self.geometry(f"{window_width}x{window_height}+20+20")
+        self.minsize(min(900, window_width), min(600, window_height))
 
         self.worker: DobotWorker | None = None
         self.current_pose = [0.0, 0.0, 0.0, 0.0]
@@ -185,8 +191,10 @@ class DraughtsCalibrationGUI(tk.Tk):
 
         self.selected_sq = tk.StringVar(value="a1")
         self.step_size = tk.DoubleVar(value=5.0)
+        self.rotation_step = tk.DoubleVar(value=5.0)
         self.arm_color = tk.StringVar(value="white")
         self.auto_advance = tk.BooleanVar(value=True)
+        self.capture_stack_step_var = tk.StringVar(value="5.0")
 
         self.config = self.load_config()
         self.squares_coords: dict[str, dict[str, float]] = {}
@@ -202,8 +210,34 @@ class DraughtsCalibrationGUI(tk.Tk):
         return {}
 
     def save_config(self):
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            yaml.safe_dump(self.config, f, sort_keys=False, default_flow_style=False)
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=CONFIG_PATH.parent,
+                prefix=f"{CONFIG_PATH.stem}_", suffix=".tmp", delete=False,
+            ) as tmp_file:
+                tmp_path = Path(tmp_file.name)
+                yaml.safe_dump(
+                    self.config, tmp_file, sort_keys=False,
+                    default_flow_style=False, allow_unicode=True,
+                )
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+
+            with tmp_path.open("r", encoding="utf-8") as check_file:
+                saved = yaml.safe_load(check_file) or {}
+            if saved != self.config:
+                raise OSError("A verificação do arquivo salvo não corresponde à configuração atual.")
+
+            os.replace(tmp_path, CONFIG_PATH)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def load_coords_from_config(self):
         color = self.arm_color.get()
@@ -213,7 +247,8 @@ class DraughtsCalibrationGUI(tk.Tk):
         for sq, pt in overrides.items():
             if isinstance(pt, dict) and "x" in pt and "y" in pt and "z" in pt:
                 self.squares_coords[sq.lower()] = {
-                    "x": float(pt["x"]), "y": float(pt["y"]), "z": float(pt["z"])
+                    "x": float(pt["x"]), "y": float(pt["y"]), "z": float(pt["z"]),
+                    "r": float(pt.get("r", 0.0)),
                 }
 
         corners = arm_cfg.get("corners", {})
@@ -222,7 +257,8 @@ class DraughtsCalibrationGUI(tk.Tk):
                 sq_lower = sq.lower()
                 if sq_lower not in self.squares_coords:
                     self.squares_coords[sq_lower] = {
-                        "x": float(pt["x"]), "y": float(pt["y"]), "z": float(pt["z"])
+                        "x": float(pt["x"]), "y": float(pt["y"]), "z": float(pt["z"]),
+                        "r": float(pt.get("r", 0.0)),
                     }
 
     def _save_single_coord(self, sq: str, pt: dict[str, float]) -> bool:
@@ -234,9 +270,9 @@ class DraughtsCalibrationGUI(tk.Tk):
                 "x": float(round(pt["x"], 2)),
                 "y": float(round(pt["y"], 2)),
                 "z": float(round(pt["z"], 2)),
+                "r": float(round(pt.get("r", 0.0), 2)),
             }
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                yaml.safe_dump(self.config, f, sort_keys=False, default_flow_style=False)
+            self.save_config()
             return True
         except Exception as exc:
             messagebox.showerror("Erro ao Salvar", f"Falha ao salvar a casa {sq.upper()}:\n{exc}")
@@ -250,15 +286,8 @@ class DraughtsCalibrationGUI(tk.Tk):
         main_frame.pack(fill="both", expand=True)
 
         # ─── Coluna Esquerda: Tabuleiro 8x8 ──────────────────────────────────
-        left_col = ttk.LabelFrame(main_frame, text=" Tabuleiro de Damas (32 Casas Jogáveis) ", padding=10)
+        left_col = ttk.Frame(main_frame, padding=4)
         left_col.pack(side="left", fill="both", expand=True, padx=(0, 10))
-
-        lbl_info = ttk.Label(
-            left_col,
-            text="Clique em qualquer casa escura para selecioná-la. Verde = Calibrada.",
-            font=("Arial", 9)
-        )
-        lbl_info.pack(anchor="w", pady=(0, 8))
 
         board_container = ttk.Frame(left_col)
         board_container.pack(fill="both", expand=True)
@@ -317,17 +346,11 @@ class DraughtsCalibrationGUI(tk.Tk):
         # Barra de status do tabuleiro e botões utilitários
         board_actions = ttk.Frame(left_col)
         board_actions.pack(fill="x", pady=(10, 0))
-
-        self.lbl_calib_count = ttk.Label(
-            board_actions,
-            text=f"Casas gravadas: {len(self.squares_coords)} / 32",
-            font=("Arial", 10, "bold")
-        )
-        self.lbl_calib_count.pack(side="left")
+        self.lbl_calib_count = ttk.Label(board_actions, text="")  # estado interno, sem ocupar a tela
 
         btn_clear = tk.Button(
             board_actions,
-            text="🗑️ Limpar Tudo (Começar do Zero)",
+            text="LIMPAR TUDO",
             bg="#d32f2f",
             fg="#ffffff",
             activebackground="#b71c1c",
@@ -340,12 +363,19 @@ class DraughtsCalibrationGUI(tk.Tk):
         )
         btn_clear.pack(side="right")
 
-        btn_interpolate = ttk.Button(
+        btn_save_config = tk.Button(
             board_actions,
-            text="Interpolar a partir dos Cantos",
-            command=self.auto_interpolate_all
+            text="SALVAR NO SISTEMA",
+            bg="#0d47a1",
+            fg="#ffffff",
+            activebackground="#002171",
+            font=("Arial", 9, "bold"),
+            relief="raised",
+            command=self.save_all_to_config,
+            cursor="hand2",
+            padx=8,
         )
-        btn_interpolate.pack(side="right", padx=(0, 6))
+        btn_save_config.pack(side="right", padx=(0, 6))
 
         # ─── Coluna Direita: Controles e Jog ──────────────────────────────────
         right_col = ttk.Frame(main_frame, width=400)
@@ -378,51 +408,31 @@ class DraughtsCalibrationGUI(tk.Tk):
         self.btn_connect = ttk.Button(row_c, text="Conectar", command=self.toggle_connection)
         self.btn_connect.pack(side="right")
 
-        self.lbl_conn_status = ttk.Label(conn_frame, text="Status: Desconectado", foreground="#d32f2f")
-        self.lbl_conn_status.pack(anchor="w", pady=(4, 0))
+        self.lbl_conn_status = ttk.Label(conn_frame, text="Desconectado", foreground="#d32f2f")
 
         # 2. Posição Atual (Real-Time)
-        pos_frame = ttk.LabelFrame(right_col, text=" Posição Atual do Braço (Tempo Real) ", padding=8)
+        pos_frame = ttk.Frame(right_col, padding=(0, 2))
         pos_frame.pack(fill="x", pady=(0, 6))
 
         self.lbl_pos_display = ttk.Label(
             pos_frame,
-            text="X: 0.00 mm   Y: 0.00 mm   Z: 0.00 mm",
-            font=("Consolas", 12, "bold"),
+            text="X: 0.00 mm   Y: 0.00 mm   Z: 0.00 mm   R: 0.00°",
+            font=("Consolas", 10, "bold"),
             foreground="#0d47a1"
         )
         self.lbl_pos_display.pack(anchor="center", pady=4)
 
-        lbl_hint = ttk.Label(
-            pos_frame,
-            text="💡 Segure o botão na cabeça do robô para mover com a mão livre!",
-            font=("Arial", 8, "bold"),
-            foreground="#2e7d32"
-        )
-        lbl_hint.pack(anchor="center")
 
         # 3. Gravação da Casa Ativa
-        record_frame = ttk.LabelFrame(right_col, text=" Gravação da Casa Ativa ", padding=8)
+        record_frame = ttk.Frame(right_col, padding=0)
         record_frame.pack(fill="x", pady=(0, 6))
 
-        self.lbl_active_sq = ttk.Label(
-            record_frame,
-            text="Casa Selecionada: PDN 1 (A1)",
-            font=("Arial", 11, "bold"),
-            foreground="#1b5e20"
-        )
-        self.lbl_active_sq.pack(anchor="w", pady=(0, 4))
-
-        self.lbl_sq_saved_pos = ttk.Label(
-            record_frame,
-            text="Coordenada salva: Não gravada",
-            font=("Arial", 9)
-        )
-        self.lbl_sq_saved_pos.pack(anchor="w", pady=(0, 8))
+        self.lbl_active_sq = ttk.Label(record_frame, text="")
+        self.lbl_sq_saved_pos = ttk.Label(record_frame, text="")
 
         btn_record = tk.Button(
             record_frame,
-            text="📍 GRAVAR POSIÇÃO ATUAL NESTA CASA",
+            text="GRAVAR POSIÇÃO",
             bg="#2e7d32",
             fg="#ffffff",
             activebackground="#1b5e20",
@@ -439,21 +449,40 @@ class DraughtsCalibrationGUI(tk.Tk):
 
         self.btn_go_to_sq = ttk.Button(
             row_acts,
-            text="🎯 Mover Robô até esta Casa",
+            text="MOVER ROBÔ ATÉ A CASA",
             command=self.move_robot_to_selected
         )
         self.btn_go_to_sq.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        chk_advance = ttk.Checkbutton(
-            record_frame,
-            text="Auto-avançar para a próxima casa (1 -> 32) ao gravar",
-            variable=self.auto_advance
-        )
-        chk_advance.pack(anchor="w", pady=(6, 0))
+        chk_advance = ttk.Checkbutton(record_frame, variable=self.auto_advance)
+
+        # Controles compactos da bandeja de captura, ainda usados pelo jogo.
+        capture_frame = ttk.Frame(right_col, padding=(0, 2))
+        capture_frame.pack(fill="x", pady=(0, 6))
+        self.capture_coord_var = tk.StringVar(value="Bandeja não calibrada")
+        self.capture_stack_count_var = tk.StringVar(value="Peças empilhadas: 0")
+        ttk.Button(
+            capture_frame,
+            text="GRAVAR DESTINO DAS CAPTURADAS",
+            command=self.record_capture_tray,
+        ).pack(fill="x")
+        stack_row = ttk.Frame(capture_frame)
+        stack_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(stack_row, text="Z por peça (mm):").pack(side="left")
+        ttk.Spinbox(
+            stack_row, from_=0.0, to=20.0, increment=0.5, width=6,
+            textvariable=self.capture_stack_step_var,
+        ).pack(side="right")
+        ttk.Button(
+            capture_frame,
+            text="ZERAR BANDEJA",
+            command=self.reset_capture_stack_count,
+        ).pack(fill="x", pady=(4, 0))
+        self._refresh_capture_status()
 
         # 4. Movimentação Manual (Jog)
         jog_frame = ttk.LabelFrame(right_col, text=" Movimentação Manual (Jog) ", padding=8)
-        jog_frame.pack(fill="x", pady=(0, 6))
+        jog_frame.pack(before=record_frame, fill="x", pady=(0, 6))
 
         row_step = ttk.Frame(jog_frame)
         row_step.pack(fill="x", pady=(0, 6))
@@ -465,6 +494,10 @@ class DraughtsCalibrationGUI(tk.Tk):
                 value=val,
                 variable=self.step_size
             ).pack(side="left", padx=4)
+        ttk.Label(row_step, text="Passo R:").pack(side="left", padx=(8, 2))
+        ttk.Spinbox(row_step, from_=1, to=90, increment=1, width=4,
+                    textvariable=self.rotation_step).pack(side="left")
+        ttk.Label(row_step, text="°").pack(side="left")
 
         jog_grid = ttk.Frame(jog_frame)
         jog_grid.pack(anchor="center")
@@ -489,30 +522,8 @@ class DraughtsCalibrationGUI(tk.Tk):
 
         ttk.Button(jog_grid, text="-Y (Trás)", width=12, command=lambda: self.jog(0, -1, 0)).grid(row=2, column=1, padx=2, pady=2)
         ttk.Button(jog_grid, text="-Z (Desce)", width=10, command=lambda: self.jog(0, 0, -1)).grid(row=2, column=3, padx=(10, 2), pady=2)
-
-        # 5. Bandeja e Salvar
-        bottom_frame = ttk.Frame(right_col)
-        bottom_frame.pack(fill="x", pady=(6, 0))
-
-        ttk.Button(
-            bottom_frame,
-            text="Gravar Posição da Bandeja de Peças Comidas",
-            command=self.record_capture_tray
-        ).pack(fill="x", pady=(0, 6))
-
-        btn_save = tk.Button(
-            bottom_frame,
-            text="💾 SALVAR TODAS AS COORDENADAS NO ARQUIVO",
-            bg="#0d47a1",
-            fg="#ffffff",
-            activebackground="#002171",
-            font=("Arial", 10, "bold"),
-            relief="raised",
-            command=self.save_all_to_config,
-            cursor="hand2",
-            pady=6
-        )
-        btn_save.pack(fill="x")
+        ttk.Button(jog_grid, text="-R", width=10, command=lambda: self.jog(0, 0, 0, -1)).grid(row=3, column=1, padx=2, pady=2)
+        ttk.Button(jog_grid, text="+R", width=10, command=lambda: self.jog(0, 0, 0, 1)).grid(row=3, column=2, padx=2, pady=2)
 
         self.on_select_square("a1")
 
@@ -590,12 +601,12 @@ class DraughtsCalibrationGUI(tk.Tk):
     def _update_pose_ui(self, pose):
         self.current_pose = [float(pose[0]), float(pose[1]), float(pose[2]), float(pose[3])]
         self.lbl_pos_display.config(
-            text=f"X: {self.current_pose[0]:>6.2f} mm   Y: {self.current_pose[1]:>6.2f} mm   Z: {self.current_pose[2]:>6.2f} mm"
+            text=f"X: {self.current_pose[0]:>6.2f} mm   Y: {self.current_pose[1]:>6.2f} mm   Z: {self.current_pose[2]:>6.2f} mm   R: {self.current_pose[3]:>6.2f}°"
         )
 
     # ─── Ações de Movimento ───────────────────────────────────────────────────
 
-    def jog(self, dx: int, dy: int, dz: int):
+    def jog(self, dx: int, dy: int, dz: int, dr: int = 0):
         if not self.is_connected or not self.worker:
             messagebox.showwarning("Aviso", "Conecte o Dobot antes de movimentar!")
             return
@@ -604,10 +615,11 @@ class DraughtsCalibrationGUI(tk.Tk):
         nx = self.current_pose[0] + (dx * step)
         ny = self.current_pose[1] + (dy * step)
         nz = self.current_pose[2] + (dz * step)
+        nr = self.current_pose[3] + (dr * self.rotation_step.get())
 
         def _do_jog():
             try:
-                self.worker.move_to(nx, ny, nz)
+                self.worker.move_to(nx, ny, nz, nr)
             except Exception as e:
                 self.after(0, lambda err=str(e): messagebox.showwarning("Aviso de Movimento", err))
 
@@ -632,6 +644,7 @@ class DraughtsCalibrationGUI(tk.Tk):
     def _on_arm_color_changed(self):
         self.squares_coords.clear()
         self.load_coords_from_config()
+        self._refresh_capture_status()
         for sq, btn in self.sq_buttons.items():
             btn.config(bg="#2e7d32" if sq in self.squares_coords else "#37474f")
         self.lbl_calib_count.config(text=f"Casas gravadas: {len(self.squares_coords)} / 32")
@@ -651,7 +664,7 @@ class DraughtsCalibrationGUI(tk.Tk):
         if sq in self.squares_coords:
             c = self.squares_coords[sq]
             self.lbl_sq_saved_pos.config(
-                text=f"Coordenada salva: X={c['x']:.2f}  Y={c['y']:.2f}  Z={c['z']:.2f}",
+                text=f"Coordenada salva: X={c['x']:.2f}  Y={c['y']:.2f}  Z={c['z']:.2f}  R={c.get('r', 0.0):.2f}°",
                 foreground="#2e7d32"
             )
         else:
@@ -662,7 +675,7 @@ class DraughtsCalibrationGUI(tk.Tk):
             messagebox.showwarning("Aviso", "Conecte o Dobot para capturar as coordenadas!")
             return
 
-        x, y, z = self.current_pose[:3]
+        x, y, z, r = self.current_pose
         if abs(x) < 1.0 and abs(y) < 1.0:
             messagebox.showwarning("Aviso", "Aguarde a leitura inicial da posição do braço!")
             return
@@ -670,7 +683,7 @@ class DraughtsCalibrationGUI(tk.Tk):
         sq = self.selected_sq.get()
         pdn = SQUARE_TO_PDN.get(sq, 0)
 
-        self.squares_coords[sq] = {"x": round(x, 2), "y": round(y), "z": round(z)}
+        self.squares_coords[sq] = {"x": round(x, 2), "y": round(y, 2), "z": round(z, 2), "r": round(r, 2)}
 
         if sq in self.sq_buttons:
             self.sq_buttons[sq].config(bg="#2e7d32")
@@ -701,8 +714,8 @@ class DraughtsCalibrationGUI(tk.Tk):
 
         def _do_move():
             try:
-                self.worker.move_to(target["x"], target["y"], safe_z)
-                self.worker.move_to(target["x"], target["y"], target["z"])
+                self.worker.move_to(target["x"], target["y"], safe_z, target.get("r", 0.0))
+                self.worker.move_to(target["x"], target["y"], target["z"], target.get("r", 0.0))
             except Exception as e:
                 self.after(0, lambda err=str(e): messagebox.showerror("Erro de Movimento", err))
 
@@ -734,13 +747,94 @@ class DraughtsCalibrationGUI(tk.Tk):
             return
 
         color = self.arm_color.get()
-        x, y, z = self.current_pose[:3]
+        x, y, z, r = self.current_pose
+        if abs(x) < 1.0 and abs(y) < 1.0:
+            messagebox.showwarning("Aviso", "Aguarde a leitura da posição atual do Dobot.")
+            return
+        try:
+            stack_step = float(self.capture_stack_step_var.get())
+            if not 0.0 <= stack_step <= 20.0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Valor inválido", "A subida Z deve ficar entre 0 e 20 mm.")
+            return
         arm_cfg = self.config.setdefault("arms", {}).setdefault(color, {})
+        previous = {
+            key: arm_cfg.get(key)
+            for key in ("capture_x", "capture_y", "capture_z", "capture_r", "capture_stack_step_mm")
+        }
         arm_cfg["capture_x"] = float(round(x, 2))
         arm_cfg["capture_y"] = float(round(y, 2))
         arm_cfg["capture_z"] = float(round(z, 2))
-        self.save_config()
-        messagebox.showinfo("Sucesso", f"Bandeja de captura gravada!\nX={x:.2f}  Y={y:.2f}  Z={z:.2f}")
+        arm_cfg["capture_r"] = float(round(r, 2))
+        arm_cfg["capture_stack_step_mm"] = stack_step
+        try:
+            self.save_config()
+            with CONFIG_PATH.open("r", encoding="utf-8") as saved_file:
+                saved_config = yaml.safe_load(saved_file) or {}
+            saved_arm = saved_config.get("arms", {}).get(color, {})
+            saved_position = tuple(saved_arm.get(f"capture_{axis}", 0.0) for axis in "xyzr")
+            expected_position = tuple(arm_cfg.get(f"capture_{axis}", 0.0) for axis in "xyzr")
+            if saved_position != expected_position:
+                raise OSError("A posição da bandeja não foi confirmada no arquivo salvo.")
+        except Exception as exc:
+            for key, value in previous.items():
+                if value is None:
+                    arm_cfg.pop(key, None)
+                else:
+                    arm_cfg[key] = value
+            messagebox.showerror(
+                "Erro ao salvar a bandeja",
+                f"Não foi possível confirmar as coordenadas em:\n{CONFIG_PATH}\n\n{exc}",
+            )
+            self._refresh_capture_status()
+            return
+
+        self.config = saved_config
+        self._refresh_capture_status()
+        messagebox.showinfo(
+            "Bandeja salva definitivamente",
+            f"Coordenadas confirmadas em:\n{CONFIG_PATH}\n\n"
+            f"Braço: {color}\nX={x:.2f}  Y={y:.2f}  Z={z:.2f}  R={r:.2f}°",
+        )
+
+    def _refresh_capture_status(self):
+        if not hasattr(self, "capture_coord_var"):
+            return
+        arm_cfg = self.config.get("arms", {}).get(self.arm_color.get(), {})
+        coords = [arm_cfg.get(f"capture_{axis}") for axis in ("x", "y", "z")]
+        rotation = float(arm_cfg.get("capture_r", 0.0))
+        if hasattr(self, "capture_stack_count_var"):
+            self.capture_stack_count_var.set(
+                f"Peças empilhadas: {int(arm_cfg.get('capture_stack_count', 0))}"
+            )
+        if hasattr(self, "capture_stack_step_var"):
+            self.capture_stack_step_var.set(str(arm_cfg.get("capture_stack_step_mm", 5.0)))
+        if all(value is not None for value in coords):
+            self.capture_coord_var.set(
+                "X={:.2f} mm   Y={:.2f} mm   Z={:.2f} mm   R={:.2f}°".format(
+                    *(float(value) for value in coords), rotation
+                )
+            )
+        else:
+            self.capture_coord_var.set("Bandeja não calibrada — grave a posição atual")
+
+    def reset_capture_stack_count(self):
+        color = self.arm_color.get()
+        arm_cfg = self.config.setdefault("arms", {}).setdefault(color, {})
+        arm_cfg["capture_stack_count"] = 0
+        try:
+            self.save_config()
+        except Exception as exc:
+            messagebox.showerror(
+                "Erro ao salvar",
+                f"Não foi possível zerar a contagem em {CONFIG_PATH}:\n{exc}",
+            )
+            return
+        self.capture_stack_count_var.set("Peças empilhadas: 0")
+        messagebox.showinfo(
+            "Contagem zerada", "A contagem foi zerada. Use isso somente depois de esvaziar a bandeja."
+        )
 
     def auto_interpolate_all(self):
         """Interpola as 32 casas se ao menos A1 e H8 estiverem calibradas."""
@@ -765,15 +859,17 @@ class DraughtsCalibrationGUI(tk.Tk):
                 "x": a1["x"] + (7.0/6.0)*(g1["x"] - a1["x"]),
                 "y": a1["y"] + (7.0/6.0)*(g1["y"] - a1["y"]),
                 "z": a1["z"] + (7.0/6.0)*(g1["z"] - a1["z"]),
+                "r": a1.get("r", 0.0) + (7.0/6.0)*(g1.get("r", 0.0) - a1.get("r", 0.0)),
             }
             a8 = {
                 "x": h8["x"] + (7.0/6.0)*(b8["x"] - h8["x"]),
                 "y": h8["y"] + (7.0/6.0)*(b8["y"] - h8["y"]),
                 "z": h8["z"] + (7.0/6.0)*(b8["z"] - h8["z"]),
+                "r": h8.get("r", 0.0) + (7.0/6.0)*(b8.get("r", 0.0) - h8.get("r", 0.0)),
             }
         else:
-            h1 = {"x": h8["x"], "y": a1["y"], "z": a1["z"]}
-            a8 = {"x": a1["x"], "y": h8["y"], "z": h8["z"]}
+            h1 = {"x": h8["x"], "y": a1["y"], "z": a1["z"], "r": a1.get("r", 0.0)}
+            a8 = {"x": a1["x"], "y": h8["y"], "z": h8["z"], "r": h8.get("r", 0.0)}
 
         for sq in DRAUGHTS_SQUARES:
             file_idx = ord(sq[0].lower()) - ord("a")
@@ -783,7 +879,8 @@ class DraughtsCalibrationGUI(tk.Tk):
             x = (1-u)*(1-v)*a1["x"] + u*(1-v)*h1["x"] + (1-u)*v*a8["x"] + u*v*h8["x"]
             y = (1-u)*(1-v)*a1["y"] + u*(1-v)*h1["y"] + (1-u)*v*a8["y"] + u*v*h8["y"]
             z = (1-u)*(1-v)*a1["z"] + u*(1-v)*h1["z"] + (1-u)*v*a8["z"] + u*v*h8["z"]
-            self.squares_coords[sq] = {"x": round(x, 2), "y": round(y, 2), "z": round(z, 2)}
+            r = (1-u)*(1-v)*a1.get("r", 0.0) + u*(1-v)*h1.get("r", 0.0) + (1-u)*v*a8.get("r", 0.0) + u*v*h8.get("r", 0.0)
+            self.squares_coords[sq] = {"x": round(x, 2), "y": round(y, 2), "z": round(z, 2), "r": round(r, 2)}
             if sq in self.sq_buttons:
                 self.sq_buttons[sq].config(bg="#2e7d32")
 
@@ -793,29 +890,37 @@ class DraughtsCalibrationGUI(tk.Tk):
 
     def save_all_to_config(self):
         try:
-            if not self.squares_coords:
-                messagebox.showwarning("Aviso", "Nenhuma coordenada calibrada para salvar!")
-                return
-
             color = self.arm_color.get()
             arm_cfg = self.config.setdefault("arms", {}).setdefault(color, {})
+            has_capture = all(arm_cfg.get(f"capture_{axis}") is not None for axis in "xyz")
+            stack_step = float(self.capture_stack_step_var.get())
+            if not 0.0 <= stack_step <= 20.0:
+                raise ValueError("A subida Z deve ficar entre 0 e 20 mm.")
+            arm_cfg["capture_stack_step_mm"] = stack_step
+            if not self.squares_coords and not has_capture:
+                messagebox.showwarning(
+                    "Aviso", "Não há coordenadas de casas nem da bandeja para salvar."
+                )
+                return
 
             # Salvar square_overrides com cada uma das casas calibradas
-            arm_cfg["square_overrides"] = {}
-            for sq, pt in self.squares_coords.items():
-                arm_cfg["square_overrides"][sq.upper()] = {
-                    "x": float(round(pt["x"], 2)),
-                    "y": float(round(pt["y"], 2)),
-                    "z": float(round(pt["z"], 2)),
-                }
+            if self.squares_coords:
+                arm_cfg["square_overrides"] = {}
+                for sq, pt in self.squares_coords.items():
+                    arm_cfg["square_overrides"][sq.upper()] = {
+                        "x": float(round(pt["x"], 2)),
+                        "y": float(round(pt["y"], 2)),
+                        "z": float(round(pt["z"], 2)),
+                        "r": float(round(pt.get("r", 0.0), 2)),
+                    }
 
             # Calcular corners (A1, H1, A8, H8) para compatibilidade
             if "a1" in self.squares_coords and "h8" in self.squares_coords:
                 arm_cfg.setdefault("corners", {})
                 a1 = self.squares_coords["a1"]
                 h8 = self.squares_coords["h8"]
-                arm_cfg["corners"]["A1"] = {"x": float(a1["x"]), "y": float(a1["y"]), "z": float(a1["z"])}
-                arm_cfg["corners"]["H8"] = {"x": float(h8["x"]), "y": float(h8["y"]), "z": float(h8["z"])}
+                arm_cfg["corners"]["A1"] = {"x": float(a1["x"]), "y": float(a1["y"]), "z": float(a1["z"]), "r": float(a1.get("r", 0.0))}
+                arm_cfg["corners"]["H8"] = {"x": float(h8["x"]), "y": float(h8["y"]), "z": float(h8["z"]), "r": float(h8.get("r", 0.0))}
 
                 if "g1" in self.squares_coords and "b8" in self.squares_coords:
                     g1 = self.squares_coords["g1"]
@@ -826,8 +931,8 @@ class DraughtsCalibrationGUI(tk.Tk):
                     a8_x = h8["x"] + (7.0/6.0)*(b8["x"] - h8["x"])
                     a8_y = h8["y"] + (7.0/6.0)*(b8["y"] - h8["y"])
                     a8_z = h8["z"] + (7.0/6.0)*(b8["z"] - h8["z"])
-                    arm_cfg["corners"]["H1"] = {"x": float(round(h1_x, 2)), "y": float(round(h1_y, 2)), "z": float(round(h1_z, 2))}
-                    arm_cfg["corners"]["A8"] = {"x": float(round(a8_x, 2)), "y": float(round(a8_y, 2)), "z": float(round(a8_z, 2))}
+                    arm_cfg["corners"]["H1"] = {"x": float(round(h1_x, 2)), "y": float(round(h1_y, 2)), "z": float(round(h1_z, 2)), "r": float(round(a1.get("r", 0.0) + (7.0/6.0)*(g1.get("r", 0.0)-a1.get("r", 0.0)), 2))}
+                    arm_cfg["corners"]["A8"] = {"x": float(round(a8_x, 2)), "y": float(round(a8_y, 2)), "z": float(round(a8_z, 2)), "r": float(round(h8.get("r", 0.0) + (7.0/6.0)*(b8.get("r", 0.0)-h8.get("r", 0.0)), 2))}
 
             # Altura média de pega (grip_z)
             all_zs = [pt["z"] for pt in self.squares_coords.values()]
@@ -835,17 +940,35 @@ class DraughtsCalibrationGUI(tk.Tk):
                 arm_cfg["grip_z"] = float(round(sum(all_zs) / len(all_zs), 2))
 
             self.save_config()
+            saved_file = CONFIG_PATH.open("r", encoding="utf-8")
+            try:
+                saved_config = yaml.safe_load(saved_file) or {}
+            finally:
+                saved_file.close()
+            saved_arm = saved_config.get("arms", {}).get(color, {})
+            if self.squares_coords and len(saved_arm.get("square_overrides", {})) != len(self.squares_coords):
+                raise OSError("A verificação das casas gravadas no YAML falhou.")
+            if has_capture and any(
+                saved_arm.get(f"capture_{axis}") != arm_cfg.get(f"capture_{axis}")
+                for axis in "xyz"
+            ):
+                raise OSError("A verificação da bandeja gravada no YAML falhou.")
+            self.config = saved_config
             messagebox.showinfo(
                 "Sucesso",
-                f"Configuração salva com sucesso em {CONFIG_PATH}!\n"
-                f"Total de {len(self.squares_coords)} casas gravadas."
+                f"Coordenadas confirmadas em:\n{CONFIG_PATH}\n\n"
+                f"Casas gravadas: {len(self.squares_coords)}\n"
+                f"Bandeja de captura: {'gravada' if has_capture else 'não configurada'}"
             )
         except Exception as exc:
             messagebox.showerror("Erro ao Salvar", f"Falha ao salvar no arquivo de configuração:\n{exc}")
 
     def destroy(self):
         self.running = False
-        self.disconnect_robot()
+        if self.worker:
+            self.worker.close()
+            self.worker = None
+        self.is_connected = False
         try:
             super().destroy()
         except tk.TclError:

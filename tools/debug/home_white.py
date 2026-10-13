@@ -12,10 +12,10 @@ import asyncio
 import logging
 import sys
 
-from xadrez_robotico.robot.arm import Arm
+from damas.robot.arm import Arm
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger("xadrez.home_white")
+logger = logging.getLogger("damas.home_white")
 
 
 async def run(port: str) -> int:

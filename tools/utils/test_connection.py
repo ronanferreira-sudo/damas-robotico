@@ -21,7 +21,7 @@ import time
 import serial.tools.list_ports
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger("xadrez.test_connection")
+logger = logging.getLogger("damas.test_connection")
 
 
 def find_dobot_ports() -> list[str]:

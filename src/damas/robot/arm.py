@@ -54,10 +54,18 @@ class Arm:
         self.velocity = float(cfg.get("velocity", 60.0))
         self.acceleration = float(cfg.get("acceleration", 60.0))
         self.effector = str(cfg.get("effector", "suction")).lower()
+        self.capture_stack_step_mm = float(cfg.get("capture_stack_step_mm", 5.0))
+        if not 0.0 <= self.capture_stack_step_mm <= 20.0:
+            raise ValueError("capture_stack_step_mm deve estar entre 0 e 20 mm.")
+        self.capture_count = 0
+        limits = cfg.get("limits", {})
+        self.z_min = float(limits.get("z_min_mm", -70.0))
+        self.z_max = float(limits.get("z_max_mm", 160.0))
+        capture_values = [cfg.get(f"capture_{axis}") for axis in ("x", "y", "z")]
         self.capture = (
-            float(cfg.get("capture_x", 250.0)),
-            float(cfg.get("capture_y", 0.0)),
-            float(cfg.get("capture_z", self.grip_z)),
+            tuple(float(value) for value in capture_values)
+            if all(value is not None for value in capture_values)
+            else None
         )
         self.connection = str(cfg.get("connection", "usb"))
 
@@ -155,13 +163,31 @@ class Arm:
 
     async def remove_captured(self, square: str) -> None:
         """Remove (captura) a peca adversaria em `square`, levando-a a bandeja."""
+        if self.capture is None:
+            raise ValueError(
+                f"Bandeja de captura não calibrada para o braço {self.color}. "
+                "Grave capture_x, capture_y e capture_z na tela de calibragem."
+            )
         logger.info("[%s] Removendo capturada em %s -> bandeja", self.color, square)
+        cx, cy, base_z = self.capture
+        drop_z = base_z + self.capture_count * self.capture_stack_step_mm
+        if not self.z_min <= drop_z <= self.z_max:
+            raise ValueError(
+                f"A pilha de capturadas exige Z={drop_z:.1f} mm, fora dos limites do braço. "
+                "Reduza a subida Z ou grave a bandeja mais baixa."
+            )
+        safe_z = min(self.z_max, max(self.travel_z, drop_z + 30.0))
+        if safe_z < drop_z + 10.0:
+            raise ValueError(
+                "Não há altura segura para alcançar o topo da pilha. "
+                "Grave a bandeja mais baixa ou reduza a subida Z."
+            )
         await self.pick(square)
-        cx, cy, cz = self.capture
-        await self.robot.motion.movl(cx, cy, self.travel_z, 0)
-        await self.robot.motion.movl(cx, cy, cz, 0)
+        await self.robot.motion.movl(cx, cy, safe_z, 0)
+        await self.robot.motion.movl(cx, cy, drop_z, 0)
         await self._grip(False)
-        await self.robot.motion.movl(cx, cy, self.travel_z, 0)
+        self.capture_count += 1
+        await self.robot.motion.movl(cx, cy, safe_z, 0)
 
     async def get_pose(self) -> Any:
         return await self.robot.dashboard.get_pose()

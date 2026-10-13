@@ -1,9 +1,10 @@
-"""Estado do tabuleiro de xadrez baseado em pydraughts para Damas Brasileiras."""
+"""Estado do tabuleiro de damas baseado em pydraughts para Damas Brasileiras."""
 
 from __future__ import annotations
 
 import draughts
 from draughts.core.variant import Move
+import re
 
 
 class BoardState:
@@ -56,34 +57,30 @@ class BoardState:
     def outcome(self) -> str:
         if not self.board.is_over():
             return ""
-        if self.board.is_draw():
-            return "draw"
         if self.board.winner == draughts.WHITE:
             return "white"
         elif self.board.winner == draughts.BLACK:
             return "black"
+        # Em pydraughts, partidas terminadas sem vencedor são empates.
         return "draw"
 
     def piece_map(self) -> dict[str, str]:
-        pdn_to_sq = {
-            1: "a1", 2: "c1", 3: "e1", 4: "g1",
-            5: "b2", 6: "d2", 7: "f2", 8: "h2",
-            9: "a3", 10: "c3", 11: "e3", 12: "g3",
-            13: "b4", 14: "d4", 15: "f4", 16: "h4",
-            17: "a5", 18: "c5", 19: "e5", 20: "g5",
-            21: "b6", 22: "d6", 23: "f6", 24: "h6",
-            25: "a7", 26: "c7", 27: "e7", 28: "g7",
-            29: "b8", 30: "d8", 31: "f8", 32: "h8",
-        }
-        out = {}
-        for pos in self.board._game.board.searcher.filled_positions:
-            piece = self.board._game.board.searcher.get_piece_by_position(pos)
-            if piece:
-                sym = "W" if piece.player == draughts.WHITE else "B"
-                if not piece.king:
-                    sym = sym.lower()
-                sq = pdn_to_sq.get(pos, str(pos))
-                out[sq] = sym
+        # O searcher interno do pydraughts usa índices próprios que não
+        # correspondem aos números PDN após um lance. O FEN mantém as casas
+        # algébricas corretas e também identifica as damas com o prefixo K.
+        sections = self.board.fen.split(":")
+        out: dict[str, str] = {}
+        for section in sections[1:]:
+            if not section or section[0] not in ("W", "B"):
+                continue
+            color = section[0].lower()
+            for token in section[1:].split(","):
+                token = token.strip()
+                match = re.fullmatch(r"(K)?([a-h][1-8])", token, re.IGNORECASE)
+                if match:
+                    is_king, square = match.groups()
+                    symbol = color.upper() if is_king else color
+                    out[square.lower()] = symbol
         return out
 
     def copy(self) -> "BoardState":

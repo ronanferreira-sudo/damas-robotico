@@ -4,10 +4,10 @@ from pathlib import Path
 import yaml
 import sys
 
-# Garante que o pacote xadrez_robotico seja encontrado
+# Garante que o pacote damas seja encontrado
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from xadrez_robotico.robot.arm import Arm
+from damas.robot.arm import Arm
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 

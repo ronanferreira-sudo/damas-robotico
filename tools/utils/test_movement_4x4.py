@@ -1,7 +1,7 @@
 """Teste de movimento de um braco Dobot numa grade 4x4.
 
 Move pecas (pegar -> transportar -> soltar) entre os 16 quadrados de uma
-grade 4x4, SEM logica de xadrez. Util para validar cinematica (origem,
+grade 4x4, SEM logica de damas. Util para validar cinematica (origem,
 espacamento, rotacao), alturas e end-effector antes de usar o tabuleiro
 8x8 real com pecas verdadeiras.
 
@@ -25,11 +25,11 @@ import asyncio
 import logging
 import sys
 
-from xadrez_robotico.robot.arm import Arm, find_all_dobot_ports
-from xadrez_robotico.robot.kinematics import grid_squares
+from damas.robot.arm import Arm, find_all_dobot_ports
+from damas.robot.kinematics import grid_squares
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger("xadrez.test_movement_4x4")
+logger = logging.getLogger("damas.test_movement_4x4")
 
 FILES = 4
 RANKS = 4

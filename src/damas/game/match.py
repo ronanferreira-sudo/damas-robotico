@@ -1,4 +1,4 @@
-"""Orquestrador da partida de xadrez com bracos roboticos.
+"""Orquestrador da partida de damas com bracos roboticos.
 
 Em modo "simulation" roda sem hardware (visao = verdade do tabuleiro).
 Em modo "hardware" conecta os bracos Dobot e as cameras, executa os lances
@@ -12,7 +12,7 @@ import logging
 from collections import defaultdict
 from typing import Any
 
-from ..chess.board_state import BoardState
+from ..draughts.board_state import BoardState
 from ..vision.calibration import Calibration
 from .players import AIPlayer, HumanPlayer, Player
 
@@ -105,21 +105,34 @@ class Match:
             await self._setup_simulation()
 
     async def _setup_hardware(self) -> None:
-        from ..robot.arm import Arm, assign_auto_ports, find_all_dobot_ports
+        from ..robot.arm import Arm, find_all_dobot_ports
 
         arms_cfg = self.config.get("arms", {})
         auto_ports = find_all_dobot_ports()
         logger.info("Portas Dobot encontradas: %s", auto_ports)
-        assignments = assign_auto_ports(["white", "black"], auto_ports)
+
+        # Distribui as portas detectadas apenas entre os braços que pedem "auto".
+        auto_needed = [
+            color for color in ("white", "black")
+            if str(arms_cfg.get(color, {}).get("serial_port", "auto")).lower() == "auto"
+        ]
+        assignments = {}
+        for i, color in enumerate(auto_needed):
+            assignments[color] = auto_ports[i % len(auto_ports)] if auto_ports else None
+
         for color in ("white", "black"):
             cfg = arms_cfg.get(color, {})
             if not cfg.get("enabled", False):
                 continue
-            arm = Arm(color, cfg, serial_port=assignments.get(color))
+            serial_port = assignments.get(color)
+            arm = Arm(color, cfg, serial_port=serial_port)
             logger.info("[%s] porta=%s", color, arm.serial_port)
-            await arm.connect()
-            await arm.home()
-            self.arms[color] = arm
+            try:
+                await arm.connect()
+                await arm.home()
+                self.arms[color] = arm
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] falha ao conectar/deslocar: %s", color, exc)
 
     async def _setup_simulation(self) -> None:
         pass

@@ -1,95 +1,29 @@
-# Xadrez Robótico
+# Damas com braço robótico
 
-Sistema onde **dois braços robóticos Dobot Magician Lite** jogam xadrez
-controlados por **Inteligência Artificial**, usando **visão computacional**
-(câmeras) para identificar o estado do tabuleiro após cada jogada. Ao final,
-um dos lados vence.
-
-```
-                 ┌──────────────┐      ┌──────────────┐
-   Câmera ───────▶│   Visão      │      │   Xadrez     │◀─── decide lance (I.A.)
-                 │ (detector)   │─────▶│  (engine)    │
-                 └──────────────┘      └──────┬───────┘
-                                              │ plano de ações
-                                 ┌────────────┴────────────┐
-                            Braço Branco              Braço Preto
-                         (Magician Lite)           (Magician Lite)
-```
-
-## Arquitetura
-
-| Módulo | Responsabilidade |
-|--------|------------------|
-| `xadrez_robotico/chess/` | Estado do tabuleiro (`BoardState`) e motor de I.A. (`engine.py`). Usa **Stockfish** se disponível, senão cai para **minimax** com poda alfa-beta. |
-| `xadrez_robotico/vision/` | Câmera (real via OpenCV ou simulada), detector de ocupação/cor por subtração de fundo e calibração quadrado↔pixel. |
-| `xadrez_robotico/robot/` | Cinemática (quadrado → coordenada do robô) e `Arm` (pegar/transportar/soltar com ventosa ou garra). |
-| `xadrez_robotico/dobot/` | Driver vendorizado do Magician Lite (USB via `pydobot` ou WebSocket/RPC). Reutilizado de projetos Dobot existentes. |
-| `xadrez_robotico/game/` | Orquestrador da partida: turnos, planejamento de ações (movimento + captura + roque + promoção) e verificação com a visão. |
-| `xadrez_robotico/cli.py` | Interface de linha de comando (`play`, `detect`, `calibrate`). |
-
-## Pré-requisitos
-
-- Python 3.10+
-- Braços **Dobot Magician Lite** (um por cor) com drivers/SDK instalados
-- Câmera (webcam) para a visão
-- Opcional: binário **Stockfish** no `PATH` para a I.A. mais forte
+Projeto para jogar Damas Brasileiras contra a IA e executar movimentos com braços Dobot Magician Lite. Inclui interface gráfica, calibração de coordenadas, visão computacional e modo de simulação.
 
 ## Instalação
 
-```bash
+```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1        # Windows
-pip install -r requirements.txt
-pip install -e .                  # registra o comando `xadrez`
+.venv\Scripts\Activate.ps1
+pip install -e .
 ```
 
 ## Uso
 
-### Simulação (sem hardware)
-
-Roda a partida inteira em software, com a "visão" lendo o tabuleiro real
-(útil para desenvolvimento e testes):
-
-```bash
-xadrez play --mode simulation
+```powershell
+damas play_gui                 # Jogo gráfico contra a IA
+damas setup_arms               # Conectar e calibrar o braço
+damas play --mode simulation   # Partida pela linha de comando
 ```
 
-### Hardware (braços + câmeras reais)
+Use `--config` para selecionar outro arquivo de configuração e `--arm white` ou `--arm black` para escolher o braço da interface gráfica. Os parâmetros locais do robô ficam em `config/default.yaml`.
 
-1. **Calibre a câmera** (centro em pixels dos 4 cantos do tabuleiro):
-   ```bash
-   xadrez calibrate --output config/calibration.yaml
-   ```
-   Tire uma foto do tabuleiro **vazio** e aponte `empty_reference` no YAML gerado.
+## Estrutura
 
-2. **Jogue com hardware**:
-   ```bash
-   xadrez play --mode hardware --calibration config/calibration.yaml
-   ```
-
-3. **Teste só a detecção** da câmera:
-   ```bash
-   xadrez detect --calibration config/calibration.yaml
-   ```
-
-A configuração geral fica em `config/default.yaml` (portas seriais, origem e
-espaçamento de cada braço, alturas de pegar/soltar, nível dos jogadores, etc.).
-
-## Como funciona um lance
-
-1. A I.A. do jogador da vez escolhe o melhor lance legal.
-2. O orquestrador (`Match`) calcula o **delta** do tabuleiro e gera ações:
-   - `move` — o braço da cor move a peça de → para;
-   - `capture` — o braço **adversário** retira a peça capturada para a sua bandeja.
-   (Roque e promoção são tratados genericamente por diferença de tabuleiro.)
-3. Os braços executam as ações fisicamente (ventosa/garra).
-4. A câmera reconfere o tabuleiro; divergências são registradas em log.
-5. Repete até xeque-mate, empate ou fim de jogo — **um dos lados vence**.
-
-## Limitações conhecidas / evoluções
-
-- A visão detecta **ocupação e cor**, mas não o **tipo** da peça (rei, torre…).
-  Próximo passo: templates por peça ou modelo treinado.
-- Promoção física move a peça, mas não troca o modelo (ex.: peão→dama).
-- A cinemática assume tabuleiro plano e alinhado (transformada rígida); para
-  desalinhamentos maiores, usar homografia de 4 pontos.
+- `src/damas/draughts/`: estado do tabuleiro e motor de Damas.
+- `src/damas/game/`: regras da partida e planejamento dos movimentos e capturas.
+- `src/damas/robot/` e `src/damas/dobot/`: controle dos braços Dobot.
+- `src/damas/vision/`: câmera, detecção e calibração.
+- `tools/`: interfaces gráficas e ferramentas de configuração.

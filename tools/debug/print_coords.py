@@ -1,6 +1,6 @@
 import sys
 import yaml
-from xadrez_robotico.robot.kinematics import BoardToRobot, grid_squares
+from damas.robot.kinematics import BoardToRobot, grid_squares
 
 def main():
     if len(sys.argv) < 2:

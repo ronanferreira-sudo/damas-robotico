@@ -12,10 +12,10 @@ import asyncio
 import logging
 import sys
 
-from xadrez_robotico.robot.arm import Arm, assign_auto_ports, find_all_dobot_ports
+from damas.robot.arm import Arm, assign_auto_ports, find_all_dobot_ports
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger("xadrez.home_arms")
+logger = logging.getLogger("damas.home_arms")
 
 
 async def run_home(white_port: str | None, black_port: str | None) -> int:

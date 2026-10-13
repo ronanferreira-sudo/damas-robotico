@@ -1,4 +1,4 @@
-content = '''"""Estado do tabuleiro de xadrez baseado em pydraughts para Damas Brasileiras."""
+content = '''"""Estado do tabuleiro de damas baseado em pydraughts para Damas Brasileiras."""
 
 from __future__ import annotations
 
@@ -89,6 +89,6 @@ class BoardState:
     def copy(self) -> "BoardState":
         return BoardState(self.board.fen)
 '''
-with open(r"C:\projetos\xadrez\src\xadrez_robotico\chess\board_state.py", 'w', encoding='utf-8') as f:
+with open(r"C:\projetos\xadrez\src\damas\draughts\board_state.py", 'w', encoding='utf-8') as f:
     f.write(content)
 print('ok')

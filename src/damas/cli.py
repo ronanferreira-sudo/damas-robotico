@@ -1,4 +1,4 @@
-"""Ponto de entrada (CLI) do xadrez-robotico."""
+"""Ponto de entrada (CLI) do damas."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from pathlib import Path
 import yaml
 
 # Silencia avisos de deprecacao de modulos do driver Dobot vendorizado.
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="xadrez_robotico.dobot")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="damas.dobot")
 
-logger = logging.getLogger("xadrez")
+logger = logging.getLogger("damas")
 
 
 def _project_root() -> Path:
@@ -34,17 +34,17 @@ def load_config(path: str | None) -> dict:
 def load_calibration(path: str | None):
     if not path:
         return None
-    from xadrez_robotico.vision.calibration import Calibration
+    from damas.vision.calibration import Calibration
 
     p = Path(path)
     if not p.exists():
-        print(f"Calibracao nao encontrada: {p} (use 'xadrez calibrate').")
+        print(f"Calibracao nao encontrada: {p} (use 'damas calibrate').")
         return None
     return Calibration.load(str(p))
 
 
 async def cmd_play(args) -> None:
-    from xadrez_robotico.game import Match
+    from damas.game import Match
 
     config = load_config(args.config)
     if args.mode:
@@ -77,8 +77,20 @@ async def cmd_setup_arms(args) -> None:
     run_setup(args.config)
 
 
+def cmd_play_gui(args) -> None:
+    """Abre a interface gráfica para jogar Damas contra a IA com braço robótico."""
+    import sys
+    sys.path.insert(0, str(_project_root()))
+    from tools.play_vs_ai_gui import PlayVsAIGUI
+    app = PlayVsAIGUI(
+        config_path=args.config,
+        arm_color=getattr(args, "arm", "white"),
+    )
+    app.mainloop()
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="xadrez", description="Xadrez robotico com I.A. e Dobot Magician Lite.")
+    p = argparse.ArgumentParser(prog="damas", description="Damas robotico com I.A. e Dobot Magician Lite.")
     sub = p.add_subparsers(dest="command", required=True)
 
     play = sub.add_parser("play", help="Joga uma partida (simulacao ou hardware).")
@@ -90,7 +102,19 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Porta serial do braco branco (ex: COM5)")
     play.add_argument("--black-port", default=None,
                       help="Porta serial do braco preto (ex: COM4)")
+    play.add_argument("--calibration", default=None,
+                      help="Caminho para o YAML de calibracao (camera + coordenadas).")
     play.set_defaults(func=cmd_play)
+
+    play_gui = sub.add_parser(
+        "play_gui",
+        help="Abre a interface gráfica para jogar Damas contra a IA com braço robótico."
+    )
+    play_gui.add_argument("--config", default=None,
+                          help="Caminho para o YAML de configuracao.")
+    play_gui.add_argument("--arm", default="white", choices=["white", "black"],
+                          help="Braço robótico a usar para executar os lances (default: white).")
+    play_gui.set_defaults(func=cmd_play_gui)
 
     setup = sub.add_parser("setup_arms", help="Abre a interface de configuracao manual dos bracos.")
     setup.add_argument("--config", default=None)
@@ -100,10 +124,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    import inspect
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     parser = build_parser()
     args = parser.parse_args()
-    asyncio.run(args.func(args))
+    result = args.func(args)
+    if inspect.iscoroutine(result):
+        asyncio.run(result)
 
 
 if __name__ == "__main__":

@@ -21,10 +21,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from xadrez_robotico.vision.calibration import Calibration
+from damas.vision.calibration import Calibration
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger("xadrez.calibrate")
+logger = logging.getLogger("damas.calibrate")
 
 
 def parse_args() -> argparse.Namespace:

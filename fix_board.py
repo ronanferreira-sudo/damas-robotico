@@ -1,12 +1,12 @@
 import sys
-with open(r"C:\projetos\xadrez\src\xadrez_robotico\chess\board_state.py", 'r', encoding='utf-8') as f:
+with open(r"C:\projetos\xadrez\src\damas\draughts\board_state.py", 'r', encoding='utf-8') as f:
     data = f.read()
 idx = data.find('    def turn')
 if idx >= 0:
     rest = data[idx:]
 else:
     rest = data
-clean_head = '''"""Estado do tabuleiro de xadrez baseado em pydraughts para Damas Brasileiras."""
+clean_head = '''"""Estado do tabuleiro de damas baseado em pydraughts para Damas Brasileiras."""
 
 from __future__ import annotations
 
@@ -26,6 +26,6 @@ class BoardState:
         else:
             self.board = draughts.Board(variant='brazilian')
 '''
-with open(r"C:\projetos\xadrez\src\xadrez_robotico\chess\board_state.py", 'w', encoding='utf-8') as f:
+with open(r"C:\projetos\xadrez\src\damas\draughts\board_state.py", 'w', encoding='utf-8') as f:
     f.write(clean_head + rest)
 print('ok')
