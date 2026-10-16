@@ -38,24 +38,44 @@ CONFIG_PATH = ROOT / "config" / "default.yaml"
 try:
     from pydobot import Dobot as Pydobot
     from pydobot.enums import PTPMode
+    from pydobot.message import Message
+    from pydobot.enums.CommunicationProtocolIDs import CommunicationProtocolIDs
+    from pydobot.enums.ControlValues import ControlValues
     HAS_PYDOBOT = True
 except ImportError:
     HAS_PYDOBOT = False
     Pydobot = None
     PTPMode = None
+    Message = None
+    CommunicationProtocolIDs = None
+    ControlValues = None
 
 
 def find_dobot_ports() -> list[str]:
-    import serial.tools.list_ports
-    ports = list(serial.tools.list_ports.comports())
+    # Este setup usa um único Dobot, conectado à COM3.
+    return ["COM3"]
+    try:
+        import serial.tools.list_ports
+        ports = list(serial.tools.list_ports.comports())
+    except Exception:
+        return ["COM3"]
+
     detected: list[str] = []
+    others: list[str] = []
     for p in ports:
         desc = (p.description or "").lower()
-        if any(tok in desc for tok in ("dobot", "usb serial", "ch340", "cp210")):
+        hwid = (p.hwid or "").lower()
+        # 0483:5750 é o ID de hardware (USB VID:PID) do controlador STM32 do Dobot
+        if "0483:5750" in hwid or any(tok in desc for tok in ("dobot", "usb serial", "ch340", "cp210")):
             detected.append(p.device)
-        elif p.device.lower().startswith(("com", "/dev/ttyusb", "/dev/ttyacm")):
-            detected.append(p.device)
-    return detected
+        else:
+            others.append(p.device)
+
+    result = detected + others
+    for common in ("COM3",):
+        if common not in result:
+            result.append(common)
+    return result
 
 
 # ─── Mapeamento de Casas de Damas Brasileiras ─────────────────────────────────
@@ -99,12 +119,29 @@ class DobotWorker:
         self.z_min = z_min
         self.z_max = z_max
 
+    def clear_alarms(self):
+        """Limpa alarmes de sobrecorrente/limite do Dobot e reinicia a fila de comandos."""
+        if not HAS_PYDOBOT:
+            return
+        try:
+            with self.lock:
+                msg = Message()
+                msg.id = CommunicationProtocolIDs.CLEAR_ALL_ALARMS_STATE.value
+                msg.ctrl = ControlValues.ONE.value
+                self.bot._send_command(msg)
+                self.bot._set_queued_cmd_clear()
+                self.bot._set_queued_cmd_start_exec()
+        except Exception:
+            pass
+
     def get_pose(self) -> tuple[float, float, float, float]:
         with self.lock:
             p = self.bot.pose()
             return (float(p[0]), float(p[1]), float(p[2]), float(p[3]))
 
-    def move_to(self, x: float, y: float, z: float, r: float = 0.0, timeout: float = 5.0):
+    def move_to(self, x: float, y: float, z: float, r: float = 0.0,
+                timeout: float = 12.0, joint: bool = False):
+        """Move o braço para (x, y, z, r) com espera real de parada física."""
         dist = math.sqrt(x * x + y * y)
         if dist > self.max_reach:
             raise ValueError(
@@ -123,9 +160,11 @@ class DobotWorker:
                 f"({self.z_min:.0f} a {self.z_max:.0f} mm)!"
             )
 
+        ptp_mode = PTPMode.MOVJ_XYZ if joint else PTPMode.MOVL_XYZ
         with self.lock:
-            res = self.bot._set_ptp_cmd(x, y, z, r, mode=PTPMode.MOVL_XYZ, wait=False)
+            res = self.bot._set_ptp_cmd(x, y, z, r, mode=ptp_mode, wait=False)
         if res is None or not getattr(res, 'params', None):
+            self.clear_alarms()
             raise TimeoutError(f"Falha na comunicação com o robô ao mover para (X={x:.1f}, Y={y:.1f}, Z={z:.1f}).\nVerifique a conexão USB do Dobot.")
         expected_idx = struct.unpack_from('L', res.params, 0)[0]
 
@@ -135,17 +174,30 @@ class DobotWorker:
                 with self.lock:
                     current_idx = self.bot._get_queued_cmd_current_index()
                 if current_idx >= expected_idx:
-                    return
+                    break
+            except Exception:
+                pass
+            time.sleep(0.04)
+        else:
+            self.clear_alarms()
+            raise TimeoutError(f"O robô não conseguiu alcançar a posição (X={x:.1f}, Y={y:.1f}, Z={z:.1f}) a tempo.\nVerifique se o braço está no limite da articulação física.")
+
+        # Aguarda o robô desacelerar e atingir a proximidade física do alvo
+        t_settle = time.time()
+        while time.time() - t_settle < 1.5:
+            try:
+                with self.lock:
+                    p = self.bot.pose()
+                dx = abs(p[0] - x)
+                dy = abs(p[1] - y)
+                dz = abs(p[2] - z)
+                if dx < 6.0 and dy < 6.0 and dz < 6.0:
+                    break
             except Exception:
                 pass
             time.sleep(0.04)
 
-        try:
-            self.bot._set_queued_cmd_clear()
-            self.bot._set_queued_cmd_start_exec()
-        except Exception:
-            pass
-        raise TimeoutError(f"O robô não conseguiu alcançar a posição (X={x:.1f}, Y={y:.1f}, Z={z:.1f}) a tempo.\nVerifique se o braço está no limite da articulação física.")
+        time.sleep(0.08)
 
     def home(self):
         with self.lock:
@@ -385,24 +437,25 @@ class DraughtsCalibrationGUI(tk.Tk):
         conn_frame = ttk.LabelFrame(right_col, text=" Conexão com Dobot ", padding=8)
         conn_frame.pack(fill="x", pady=(0, 6))
 
-        ports = find_dobot_ports() or ["COM5"]
+        ports = find_dobot_ports()
         self.port_var = tk.StringVar(value=ports[0])
 
         row_c = ttk.Frame(conn_frame)
         row_c.pack(fill="x")
         ttk.Label(row_c, text="Porta:").pack(side="left", padx=(0, 4))
         self.combo_port = ttk.Combobox(row_c, textvariable=self.port_var, values=ports, width=8)
-        self.combo_port.pack(side="left", padx=(0, 8))
+        self.combo_port.pack(side="left", padx=(0, 2))
+        ttk.Button(row_c, text="🔄", width=3, command=self._refresh_ports).pack(side="left", padx=(0, 6))
 
         ttk.Label(row_c, text="Braço:").pack(side="left", padx=(0, 4))
         self.combo_arm = ttk.Combobox(
             row_c,
             textvariable=self.arm_color,
-            values=["white", "black"],
+            values=["white"],
             width=8,
-            state="readonly"
+            state="disabled"
         )
-        self.combo_arm.pack(side="left", padx=(0, 8))
+        self.combo_arm.pack(side="left", padx=(0, 6))
         self.combo_arm.bind("<<ComboboxSelected>>", lambda e: self._on_arm_color_changed())
 
         self.btn_connect = ttk.Button(row_c, text="Conectar", command=self.toggle_connection)
@@ -453,6 +506,20 @@ class DraughtsCalibrationGUI(tk.Tk):
             command=self.move_robot_to_selected
         )
         self.btn_go_to_sq.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        self.btn_unlock = tk.Button(
+            record_frame,
+            text="🚨 DESTRAVAR ROBÔ (LIMPAR ALARME)",
+            bg="#d32f2f",
+            fg="#ffffff",
+            activebackground="#b71c1c",
+            font=("Arial", 9, "bold"),
+            relief="raised",
+            command=self.clear_alarms_action,
+            cursor="hand2",
+            pady=3,
+        )
+        self.btn_unlock.pack(fill="x", pady=(4, 0))
 
         chk_advance = ttk.Checkbutton(record_frame, variable=self.auto_advance)
 
@@ -528,6 +595,13 @@ class DraughtsCalibrationGUI(tk.Tk):
         self.on_select_square("a1")
 
     # ─── Conexão e Polling ────────────────────────────────────────────────────
+
+    def _refresh_ports(self):
+        ports = find_dobot_ports()
+        if hasattr(self, "combo_port"):
+            self.combo_port.config(values=ports)
+            if self.port_var.get() not in ports and ports:
+                self.port_var.set(ports[0])
 
     def toggle_connection(self):
         if self.is_connected:
@@ -605,6 +679,16 @@ class DraughtsCalibrationGUI(tk.Tk):
         )
 
     # ─── Ações de Movimento ───────────────────────────────────────────────────
+
+    def clear_alarms_action(self):
+        if not self.is_connected or not self.worker:
+            messagebox.showwarning("Aviso", "Conecte o Dobot antes de destravar!")
+            return
+        try:
+            self.worker.clear_alarms()
+            messagebox.showinfo("Sucesso", "Alarmes do Dobot limpos e comandos destravados com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro ao Destravar", str(e))
 
     def jog(self, dx: int, dy: int, dz: int, dr: int = 0):
         if not self.is_connected or not self.worker:
@@ -712,10 +796,22 @@ class DraughtsCalibrationGUI(tk.Tk):
         target = self.squares_coords[sq]
         safe_z = max(float(target["z"]) + 35.0, 60.0)
 
+        # Usa MOVJ (por juntas) para todos os movimentos nessa região:
+        # - Deslocamento até a altura segura
+        # - Descida final sobre a casa
+        # O MOVJ é mais robusto em todo o workspace do Dobot (evita singularidades
+        # que o MOVL enfrenta nas casas do rank 1 e 2, perto da base do robô).
+        # O ponto final é atingido com a mesma precisão — só o caminho difere.
         def _do_move():
             try:
-                self.worker.move_to(target["x"], target["y"], safe_z, target.get("r", 0.0))
-                self.worker.move_to(target["x"], target["y"], target["z"], target.get("r", 0.0))
+                # 1. Se estiver baixo, sobe verticalmente primeiro antes de navegar na horizontal
+                cur_pose = self.worker.get_pose()
+                if cur_pose[2] < safe_z - 10.0:
+                    self.worker.move_to(cur_pose[0], cur_pose[1], safe_z, cur_pose[3], joint=True)
+                # 2. Deslocamento na altura segura até a casa
+                self.worker.move_to(target["x"], target["y"], safe_z, target.get("r", 0.0), joint=True)
+                # 3. Descida final sobre a casa
+                self.worker.move_to(target["x"], target["y"], target["z"], target.get("r", 0.0), joint=True)
             except Exception as e:
                 self.after(0, lambda err=str(e): messagebox.showerror("Erro de Movimento", err))
 

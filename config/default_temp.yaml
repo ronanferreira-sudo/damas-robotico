@@ -1,0 +1,279 @@
+mode: simulation
+board:
+  squares: 8
+  surface_z: 0.0
+  square_size_mm: 45.0
+arms:
+  white:
+    enabled: true
+    color: white
+    connection: usb
+    serial_port: COM3
+    origin_x: 120.0
+    origin_y: -120.0
+    rotation_deg: 0.0
+    spacing: 45.0
+    travel_z: 100.0
+    grip_z: 24.13
+    capture_x: 217.53
+    capture_y: 122.0
+    capture_z: 24.0
+    velocity: 60
+    acceleration: 60
+    effector: suction
+    limits:
+      max_reach_mm: 380.0
+      min_reach_mm: 100.0
+      z_min_mm: -70.0
+      z_max_mm: 160.0
+    corners:
+      A1:
+        x: 180.25
+        y: 80.0
+        z: 24.83
+        r: 0.0
+      H8:
+        x: 361.04
+        y: -97.0
+        z: 24.0
+        r: 0.0
+      H1:
+        x: 173.58
+        y: -95.0
+        z: 21.53
+        r: 0.0
+      A8:
+        x: 364.54
+        y: 76.83
+        z: 29.83
+        r: 0.0
+    square_overrides:
+        x: 180.25
+        y: 80.0
+        z: 24.83
+        r: 0.0
+      C1:
+        x: 179.27
+        y: 30.0
+        z: 24.76
+        r: 0.0
+      E1:
+        x: 180.89
+        y: -22.8
+        z: 22.76
+        r: 0.0
+      G1:
+        x: 174.53
+        y: -70.0
+        z: 22.0
+        r: 0.0
+      B2:
+        x: 165.31
+        y: 77.0
+        z: 22.76
+        r: 0.0
+      D2:
+        x: 179.69
+        y: 31.0
+        z: 22.76
+        r: 0.0
+      F2:
+        x: 194.53
+        y: -44.0
+        z: 23.0
+        r: 0.0
+      H2:
+        x: 169.53
+        y: -72.0
+        z: 24.0
+        r: 0.0
+      A3:
+        x: 217.53
+        y: 82.0
+        z: 24.0
+        r: 0.0
+      C3:
+        x: 220.71
+        y: 32.0
+        z: 24.0
+        r: 0.0
+      E3:
+        x: 224.53
+        y: -18.0
+        z: 24.0
+        r: 0.0
+      G3:
+        x: 223.53
+        y: -68.0
+        z: 24.0
+        r: 0.0
+      B4:
+        x: 242.53
+        y: 59.0
+        z: 24.0
+        r: 0.0
+      D4:
+        x: 245.53
+        y: 8.0
+        z: 24.0
+        r: 0.0
+      F4:
+        x: 246.53
+        y: -41.0
+        z: 24.0
+        r: 0.0
+      H4:
+        x: 247.53
+        y: -92.0
+        z: 24.0
+        r: 0.0
+      A5:
+        x: 268.53
+        y: 83.0
+        z: 24.0
+        r: 0.0
+      C5:
+        x: 269.53
+        y: 34.0
+        z: 25.0
+        r: 0.0
+      E5:
+        x: 272.53
+        y: -15.0
+        z: 25.0
+        r: 0.0
+      G5:
+        x: 273.53
+        y: -64.0
+        z: 25.0
+        r: 0.0
+      B6:
+        x: 296.53
+        y: 58.0
+        z: 25.0
+        r: 0.0
+      D6:
+        x: 299.53
+        y: 10.0
+        z: 25.0
+        r: 0.0
+      F6:
+        x: 304.04
+        y: -40.0
+        z: 25.0
+        r: 0.0
+      H6:
+        x: 305.04
+        y: -90.0
+        z: 24.0
+        r: 0.0
+      H8:
+        x: 361.04
+        y: -97.0
+        z: 24.0
+        r: 0.0
+      G7:
+        x: 331.04
+        y: -63.0
+        z: 24.0
+        r: 0.0
+      E7:
+        x: 326.04
+        y: -13.0
+        z: 24.0
+        r: 0.0
+      F8:
+        x: 365.04
+        y: -49.0
+        z: 24.0
+        r: 0.0
+      D8:
+        x: 363.04
+        y: 1.0
+        z: 25.0
+        r: 0.0
+      C7:
+        x: 324.04
+        y: 35.0
+        z: 24.0
+        r: 0.0
+      B8:
+        x: 364.04
+        y: 52.0
+        z: 29.0
+        r: 0.0
+      A7:
+        x: 322.04
+        y: 85.0
+        z: 24.0
+        r: 0.0
+      H1:
+        x: 198.86
+        y: -89.33
+        z: 21.67
+        r: 0.0
+      A8:
+        x: 377.37
+        y: 71.33
+        z: 24.0
+        r: 0.0
+    capture_stack_count: 2
+    capture_stack_step_mm: 5.0
+    capture_r: 0.0
+  black:
+    enabled: true
+    color: black
+    connection: usb
+    serial_port: COM4
+    origin_x: 120.0
+    origin_y: 120.0
+    rotation_deg: 0.0
+    spacing: 45.0
+    travel_z: 100.0
+    grip_z: 8.0
+    capture_x: 349.8218078613281
+    capture_y: -70.27952575683594
+    capture_z: -18.888151168823242
+    velocity: 60
+    acceleration: 60
+    effector: suction
+    limits:
+      max_reach_mm: 380.0
+      min_reach_mm: 100.0
+      z_min_mm: -70.0
+      z_max_mm: 160.0
+    corners:
+        x: 254.06324768066406
+        y: -45.59947967529297
+        z: -23.968368530273438
+      H1:
+        x: 254.06329345703125
+        y: 129.40054321289062
+        z: -23.96837043762207
+      H8:
+        x: 349.8218688964844
+        y: 104.72049713134766
+        z: -20.888229370117188
+      A8:
+        x: 349.8218078613281
+        y: -70.27952575683594
+        z: -18.888151168823242
+vision:
+  enabled: true
+  camera_index: 1
+  width: 640
+  height: 480
+  occupancy_threshold: 0.18
+  method: template
+engine:
+  backend: auto
+  stockfish_path: null
+  think_time: 1.0
+  minimax_depth: 3
+  players:
+    white: ai
+    black: ai
+match:
+  max_moves: 0
+  move_delay: 0.0
+  verify_with_vision: true

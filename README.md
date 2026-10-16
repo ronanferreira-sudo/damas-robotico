@@ -18,7 +18,7 @@ damas setup_arms               # Conectar e calibrar o braço
 damas play --mode simulation   # Partida pela linha de comando
 ```
 
-Use `--config` para selecionar outro arquivo de configuração e `--arm white` ou `--arm black` para escolher o braço da interface gráfica. Os parâmetros locais do robô ficam em `config/default.yaml`.
+O jogo usa o único braço branco conectado à COM3. Os parâmetros locais do robô ficam em `config/default.yaml`.
 
 ## Estrutura
 

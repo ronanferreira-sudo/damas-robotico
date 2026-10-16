@@ -1,0 +1,90 @@
+mode: simulation
+board:
+  squares: 8
+  surface_z: 0.0
+  square_size_mm: 45.0
+arms:
+  white:
+    enabled: true
+    color: white
+    connection: usb
+    serial_port: COM3
+    origin_x: 120.0
+    origin_y: -120.0
+    rotation_deg: 0.0
+    spacing: 45.0
+    travel_z: 100.0
+    grip_z: 24.13
+    capture_x: 217.53
+    capture_y: 122.0
+    capture_z: 24.0
+    velocity: 60
+    acceleration: 60
+    effector: suction
+    limits:
+      max_reach_mm: 380.0
+      min_reach_mm: 100.0
+      z_min_mm: -70.0
+      z_max_mm: 160.0
+    corners:
+    A1:\n              x: 180.25\n              y: 80.0\n              z: 24.83\n              r: 0.0\n    UNKNOWN1:\n            H8:\n              x: 361.04\n              y: -97.0\n              z: 24.0\n    UNKNOWN2:\n              r: 0.0\n            H1:\n              x: 173.58\n              y: -95.0\n    UNKNOWN3:\n              z: 21.53\n              r: 0.0\n            A8:\n              x: 364.54\n    square_overrides:
+    capture_stack_count: 2
+    capture_stack_step_mm: 5.0
+    capture_r: 0.0
+  black:
+    enabled: true
+    color: black
+    connection: usb
+    serial_port: COM4
+    origin_x: 120.0
+    origin_y: 120.0
+    rotation_deg: 0.0
+    spacing: 45.0
+    travel_z: 100.0
+    grip_z: 8.0
+    capture_x: 349.8218078613281
+    capture_y: -70.27952575683594
+    capture_z: -18.888151168823242
+    velocity: 60
+    acceleration: 60
+    effector: suction
+    limits:
+      max_reach_mm: 380.0
+      min_reach_mm: 100.0
+      z_min_mm: -70.0
+      z_max_mm: 160.0
+    corners:
+        x: 254.06324768066406
+        y: -45.59947967529297
+        z: -23.968368530273438
+      H1:
+        x: 254.06329345703125
+        y: 129.40054321289062
+        z: -23.96837043762207
+      H8:
+        x: 349.8218688964844
+        y: 104.72049713134766
+        z: -20.888229370117188
+      A8:
+        x: 349.8218078613281
+        y: -70.27952575683594
+        z: -18.888151168823242
+vision:
+  enabled: true
+  camera_index: 1
+  width: 640
+  height: 480
+  occupancy_threshold: 0.18
+  method: template
+engine:
+  backend: auto
+  stockfish_path: null
+  think_time: 1.0
+  minimax_depth: 3
+  players:
+    white: ai
+    black: ai
+match:
+  max_moves: 0
+  move_delay: 0.0
+  verify_with_vision: true

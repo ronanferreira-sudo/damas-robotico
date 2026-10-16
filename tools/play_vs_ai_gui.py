@@ -56,11 +56,17 @@ except ImportError as _e:
 try:
     from pydobot import Dobot as Pydobot
     from pydobot.enums import PTPMode
+    from pydobot.message import Message
+    from pydobot.enums.CommunicationProtocolIDs import CommunicationProtocolIDs
+    from pydobot.enums.ControlValues import ControlValues
     HAS_PYDOBOT = True
 except ImportError:
     HAS_PYDOBOT = False
     Pydobot = None
     PTPMode = None
+    Message = None
+    CommunicationProtocolIDs = None
+    ControlValues = None
 
 # ─── Mapeamento PDN → Casa (Damas Brasileiras 8×8) ───────────────────────────
 
@@ -81,27 +87,145 @@ for _rank in range(1, 9):
             _pdn += 1
 
 
+def _format_sq_display(sq: str) -> str:
+    pdn = SQUARE_TO_PDN.get(sq.lower())
+    return f"{sq.upper()} (PDN {pdn})" if pdn is not None else sq.upper()
+
+
+def _parse_sq_display(text: str) -> str:
+    if not text:
+        return ""
+    return text.split()[0].lower()
+
+
+def find_dobot_ports() -> list[str]:
+    # O único braço deste setup está conectado à COM3.
+    return ["COM3"]
+    try:
+        import serial.tools.list_ports
+        ports = list(serial.tools.list_ports.comports())
+    except Exception:
+        return ["COM3"]
+
+    detected: list[str] = []
+    others: list[str] = []
+    for p in ports:
+        desc = (p.description or "").lower()
+        hwid = (p.hwid or "").lower()
+        # 0483:5750 é o ID de hardware (USB VID:PID) do controlador STM32 do Dobot
+        if "0483:5750" in hwid or any(tok in desc for tok in ("dobot", "usb serial", "ch340", "cp210")):
+            detected.append(p.device)
+        else:
+            others.append(p.device)
+
+    result = detected + others
+    if "COM3" not in result:
+        result.insert(0, "COM3")
+    return result
+
+
 # ─── Worker do Dobot ──────────────────────────────────────────────────────────
 
 class DobotWorker:
+    SERIAL_RESPONSE_TIMEOUT = 5.0
+
     def __init__(self, port: str, max_reach=380.0, min_reach=100.0,
                  z_min=-70.0, z_max=160.0):
         if not HAS_PYDOBOT:
             raise ImportError("pydobot não instalado. Execute: pip install pydobot")
         self.bot = Pydobot(port=port)
+        # pydobot usa read_all() após uma pausa fixa de 100 ms; respostas USB
+        # fragmentadas podem ser confundidas com ausência de resposta.
+        self.bot._read_message = self._read_serial_message
         self.lock = threading.Lock()
         self.sucking = False
         self.max_reach = max_reach
         self.min_reach = min_reach
         self.z_min = z_min
         self.z_max = z_max
+        self.last_serial_error = None
+
+    def _read_serial_message(self):
+        """Lê um quadro Dobot completo, tolerando respostas USB fragmentadas."""
+        serial_conn = self.bot.ser
+        previous_timeout = serial_conn.timeout
+        # O controlador pode demorar mais para responder enquanto termina de
+        # processar o movimento anterior. Não reenvie movimentos após timeout:
+        # o primeiro comando pode já estar na fila do Dobot.
+        deadline = time.monotonic() + self.SERIAL_RESPONSE_TIMEOUT
+        header = bytearray()
+        self.last_serial_error = None
+
+        def read_exact(count: int) -> bytes | None:
+            data = bytearray()
+            while len(data) < count and time.monotonic() < deadline:
+                chunk = serial_conn.read(count - len(data))
+                if chunk:
+                    data.extend(chunk)
+            return bytes(data) if len(data) == count else None
+
+        try:
+            serial_conn.timeout = 0.05
+            while time.monotonic() < deadline:
+                byte = serial_conn.read(1)
+                if not byte:
+                    continue
+                if byte[0] == 0xAA:
+                    header.append(byte[0])
+                    if len(header) == 2:
+                        break
+                else:
+                    header.clear()
+
+            if len(header) != 2:
+                self.last_serial_error = (
+                    f"nenhum quadro de resposta chegou em "
+                    f"{self.SERIAL_RESPONSE_TIMEOUT:.0f} s"
+                )
+                return None
+
+            length_bytes = read_exact(1)
+            if length_bytes is None:
+                self.last_serial_error = "quadro serial incompleto antes do campo de tamanho"
+                return None
+            frame_length = length_bytes[0]
+            if frame_length < 2:
+                self.last_serial_error = f"tamanho inválido no quadro serial: {frame_length}"
+                return None
+
+            body = read_exact(frame_length + 1)
+            if body is None:
+                self.last_serial_error = "quadro serial incompleto nos dados de resposta"
+                return None
+            return Message(bytes(header) + length_bytes + body)
+        except Exception as exc:
+            self.last_serial_error = f"erro ao ler a porta serial: {exc}"
+            return None
+        finally:
+            serial_conn.timeout = previous_timeout
+
+    def clear_alarms(self):
+        """Limpa alarmes de sobrecorrente/limite do Dobot e reinicia a fila de comandos."""
+        if not HAS_PYDOBOT:
+            return
+        try:
+            with self.lock:
+                msg = Message()
+                msg.id = CommunicationProtocolIDs.CLEAR_ALL_ALARMS_STATE.value
+                msg.ctrl = ControlValues.ONE.value
+                self.bot._send_command(msg)
+                self.bot._set_queued_cmd_clear()
+                self.bot._set_queued_cmd_start_exec()
+        except Exception:
+            pass
 
     def get_pose(self):
         with self.lock:
             p = self.bot.pose()
             return (float(p[0]), float(p[1]), float(p[2]), float(p[3]))
 
-    def move_to(self, x, y, z, r=0.0, timeout=10.0):
+    def move_to(self, x, y, z, r=0.0, timeout=12.0, joint=False):
+        """Move o braço para (x, y, z, r) com espera real de parada física."""
         dist = math.sqrt(x * x + y * y)
         if dist > self.max_reach:
             raise ValueError(f"Fora do alcance máximo ({dist:.1f} > {self.max_reach:.0f} mm).")
@@ -109,14 +233,26 @@ class DobotWorker:
             raise ValueError(f"Muito próximo da base ({dist:.1f} < {self.min_reach:.0f} mm).")
         if not (self.z_min <= z <= self.z_max):
             raise ValueError(f"Z={z:.1f} fora dos limites [{self.z_min:.0f}, {self.z_max:.0f}] mm.")
+
+        ptp_mode = PTPMode.MOVJ_XYZ if joint else PTPMode.MOVL_XYZ
         with self.lock:
-            res = self.bot._set_ptp_cmd(x, y, z, r, mode=PTPMode.MOVL_XYZ, wait=False)
+            res = self.bot._set_ptp_cmd(x, y, z, r, mode=ptp_mode, wait=False)
         if res is None or not getattr(res, "params", None):
-            raise TimeoutError("Falha na comunicação com o robô.")
-        # O índice da fila Dobot é um uint32 little-endian. `L` depende da
-        # plataforma e pode ter 8 bytes, causando erro no Linux.
+            raise TimeoutError(
+                f"Sem resposta serial do Dobot ao enviar movimento para "
+                f"X={x:.1f}, Y={y:.1f}, Z={z:.1f} na porta {self.bot.ser.port}. "
+                f"Detalhe: {self.last_serial_error or 'resposta ausente ou vazia'}. "
+                "O comando pode ter sido aceito; a fila foi preservada para evitar "
+                "interromper um movimento em andamento."
+            )
+
         if len(res.params) < 4:
-            raise TimeoutError("Resposta do Dobot sem índice de comando válido.")
+            raise TimeoutError(
+                f"Resposta serial incompleta do Dobot para X={x:.1f}, "
+                f"Y={y:.1f}, Z={z:.1f} na porta {self.bot.ser.port} "
+                f"({len(res.params)} de 4 bytes de índice)."
+            )
+
         expected_idx = int.from_bytes(res.params[:4], byteorder="little", signed=False)
         t0 = time.time()
         while time.time() - t0 < timeout:
@@ -124,11 +260,34 @@ class DobotWorker:
                 with self.lock:
                     cur = self.bot._get_queued_cmd_current_index()
                 if cur >= expected_idx:
-                    return
+                    break
             except Exception:
                 pass
-            time.sleep(0.05)
-        raise TimeoutError(f"Robô não alcançou ({x:.1f},{y:.1f},{z:.1f}) a tempo.")
+            time.sleep(0.04)
+        else:
+            raise TimeoutError(
+                f"A fila do Dobot não confirmou o movimento para "
+                f"({x:.1f}, {y:.1f}, {z:.1f}) em {timeout:.0f} s. "
+                "A fila foi preservada; verifique o braço e use o botão de limpar "
+                "alarme somente depois de confirmar que ele parou."
+            )
+
+        # Aguarda o robô desacelerar e atingir a proximidade física do alvo
+        t_settle = time.time()
+        while time.time() - t_settle < 1.5:
+            try:
+                with self.lock:
+                    p = self.bot.pose()
+                dx = abs(p[0] - x)
+                dy = abs(p[1] - y)
+                dz = abs(p[2] - z)
+                if dx < 6.0 and dy < 6.0 and dz < 6.0:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.04)
+
+        time.sleep(0.08)
 
     def set_suction(self, enable: bool):
         with self.lock:
@@ -136,9 +295,9 @@ class DobotWorker:
             self.bot.suck(enable)
 
     def home(self):
-        with self.lock:
-            self.bot._set_ptp_cmd(227.53, 0.0, 140.83, 0.0,
-                                  mode=PTPMode.MOVJ_XYZ, wait=False)
+        # Usa o mesmo fluxo de movimento da partida: valida os limites,
+        # aguarda a fila do Dobot e confirma que o braço chegou ao destino.
+        self.move_to(227.53, 0.0, 140.83, 0.0, joint=True)
 
     def close(self):
         try:
@@ -161,7 +320,7 @@ class ArmExecutor:
                  on_capture_count=None):
         self.worker = worker
         self.coords = square_coords
-        self.travel_z = travel_z
+        self.travel_z = max(70.0, float(travel_z))
         self.capture_pos = capture_pos
         self.capture_stack_step_mm = max(0.0, float(capture_stack_step_mm))
         self.capture_count = max(0, int(capture_count))
@@ -173,27 +332,71 @@ class ArmExecutor:
             raise ValueError(f"Casa {sq} não calibrada!")
         return c
 
+    def ensure_safe_height(self):
+        """Garante que o braço suba verticalmente ANTES de qualquer deslocamento horizontal."""
+        try:
+            p = self.worker.get_pose()
+            if p[2] < (self.travel_z - 10.0):
+                # Sobe na vertical nas mesmas coordenadas X, Y onde já se encontra
+                self.worker.move_to(p[0], p[1], self.travel_z, p[3], joint=True)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Falha ao consultar a posição ou subir o braço antes do movimento: {exc}"
+            ) from exc
+
+    def _approach(self, sq: str) -> tuple[float, float, float, float, float]:
+        """Calcula coordenadas da casa: (x, y, z_touch, z_pre, r)."""
+        c = self._coord(sq)
+        x = float(c["x"])
+        y = float(c["y"])
+        z_touch = float(c["z"])
+        z_pre = z_touch + 18.0   # 18 mm acima da peça para aproximação reta
+        r = float(c.get("r", 0.0))
+        return x, y, z_touch, z_pre, r
+
     def _above(self, sq: str):
         c = self._coord(sq)
-        safe_z = max(self.travel_z, float(c["z"]) + 40.0)
-        self.worker.move_to(c["x"], c["y"], safe_z, c.get("r", 0.0))
-
-    def _to_sq(self, sq: str):
-        c = self._coord(sq)
-        self.worker.move_to(c["x"], c["y"], c["z"], c.get("r", 0.0))
+        safe_z = max(self.travel_z, float(c["z"]) + 45.0)
+        self.worker.move_to(c["x"], c["y"], safe_z, c.get("r", 0.0), joint=True)
 
     def pick(self, sq: str):
-        self._above(sq); self._to_sq(sq)
-        self.worker.set_suction(True); time.sleep(0.5)
+        x, y, z_touch, z_pre, r = self._approach(sq)
+        # 1. Garante que sobe se estiver baixo e navega pelo ar até a casa
+        self.ensure_safe_height()
+        self._above(sq)
+        # 2. Desce até 18 mm acima da peça
+        self.worker.move_to(x, y, z_pre, r, joint=True)
+        # 3. Liga o vácuo ANTES de tocar para atrair a peça suavemente
+        self.worker.set_suction(True)
+        # 4. Desce os últimos 18 mm em linha 100% reta vertical (MOVL) sem fazer curva/arco
+        self.worker.move_to(x, y, z_touch, r, joint=False)
+        # Dá tempo para a ventosa formar vácuo antes de levantar a peça.
+        time.sleep(0.8)
+        # 5. Sobe 18 mm em linha vertical reta (MOVL) levantando a peça limpa
+        self.worker.move_to(x, y, z_pre, r, joint=False)
+        # 6. Sobe até a altura de voo segura
         self._above(sq)
 
     def place(self, sq: str):
-        self._above(sq); self._to_sq(sq)
-        time.sleep(0.3); self.worker.set_suction(False)
-        time.sleep(0.3); self._above(sq)
+        x, y, z_touch, z_pre, r = self._approach(sq)
+        # 1. Já está sobre a casa na altura de voo
+        # 2. Desce até 18 mm acima da casa
+        self.worker.move_to(x, y, z_pre, r, joint=True)
+        # 3. Desce os últimos 18 mm em linha reta vertical pura (MOVL) assentando a peça
+        self.worker.move_to(x, y, z_touch, r, joint=False)
+        time.sleep(0.15)
+        # 4. Desliga o vácuo para soltar a peça
+        self.worker.set_suction(False)
+        time.sleep(0.35)
+        # 5. Sobe 18 mm retos verticais para desacoplar a borracha
+        self.worker.move_to(x, y, z_pre, r, joint=False)
+        # 6. Sobe para a altura de voo segura
+        self._above(sq)
 
     def move_piece(self, frm: str, to: str):
-        self.pick(frm); self._above(to); self.place(to)
+        self.pick(frm)      # Pega e SOBE até safe_z sobre 'frm'
+        self._above(to)     # Voa em safe_z pelo ar até sobre 'to'
+        self.place(to)      # Desce suavemente, solta e SOBE de volta sobre 'to'
 
     def remove_captured(self, sq: str):
         if not self.capture_pos:
@@ -203,35 +406,42 @@ class ArmExecutor:
             )
         cx, cy, cz = self.capture_pos[:3]
         cr = self.capture_pos[3] if len(self.capture_pos) > 3 else 0.0
+
         drop_z = cz + self.capture_count * self.capture_stack_step_mm
-        if not self.worker.z_min <= drop_z <= self.worker.z_max:
-            raise ValueError(
-                f"A pilha de capturadas exige Z={drop_z:.1f} mm, fora dos limites do braço. "
-                "Reduza a subida Z ou grave a bandeja mais baixa."
-            )
-        safe_z = min(self.worker.z_max, max(self.travel_z, drop_z + 30.0))
-        if safe_z < drop_z + 10.0:
-            raise ValueError(
-                "Não há altura segura para alcançar o topo da pilha. "
-                "Grave a bandeja mais baixa ou reduza a subida Z."
-            )
-        self.pick(sq)
-        self.worker.move_to(cx, cy, safe_z, cr)
-        self.worker.move_to(cx, cy, drop_z, cr)
-        self.worker.set_suction(False); time.sleep(0.3)
+        max_allowed_drop = min(self.worker.z_max - 20.0, cz + 30.0)
+        drop_z = max(self.worker.z_min, min(drop_z, max_allowed_drop))
+        pre_drop_z = drop_z + 18.0
+
+        safe_z = min(self.worker.z_max, max(self.travel_z, drop_z + 25.0))
+        if safe_z <= drop_z + 5.0:
+            safe_z = min(self.worker.z_max, drop_z + 15.0)
+
+        self.pick(sq)       # Pega a capturada de forma suave e sobe
+        self.worker.move_to(cx, cy, safe_z, cr, joint=True)       # Voa alto até a bandeja
+        self.worker.move_to(cx, cy, pre_drop_z, cr, joint=True)   # Desce até 18 mm da pilha
+        self.worker.move_to(cx, cy, drop_z, cr, joint=False)      # Assenta reto na pilha
+        self.worker.set_suction(False)
+        time.sleep(0.35)
         self.capture_count += 1
         if self.on_capture_count:
             self.on_capture_count(self.capture_count)
-        self.worker.move_to(cx, cy, safe_z, cr)
+        self.worker.move_to(cx, cy, pre_drop_z, cr, joint=False)  # Sobe reto da pilha
+        self.worker.move_to(cx, cy, safe_z, cr, joint=True)       # Sobe de volta da bandeja
 
     def execute_actions(self, actions: list, log_fn=None):
         for kind, color, a, b in actions:
             if log_fn:
                 log_fn(f"  → {kind}: {a}" + (f" → {b}" if b else ""))
-            if kind == "capture":
-                self.remove_captured(a)
-            else:
-                self.move_piece(a, b)
+            try:
+                if kind == "capture":
+                    self.remove_captured(a)
+                else:
+                    self.move_piece(a, b)
+            except Exception as exc:
+                destination = f" → {b}" if b else ""
+                raise RuntimeError(
+                    f"Falha ao executar {kind} {a}{destination}: {exc}"
+                ) from exc
 
 
 # ─── GUI Principal ────────────────────────────────────────────────────────────
@@ -296,7 +506,8 @@ class PlayVsAIGUI(tk.Tk):
 
         # ── Estado Jogo ──
         self.engine_cfg = self.config.get("engine", {})
-        self.board_state = BoardState(INITIAL_POSITION)
+        self.mode = "setup"                     # "setup" = repor peças / montagem; "play" = partida
+        self.board_state = BoardState("W:W:B")  # Inicia com tabuleiro vazio para montagem
         self.human_color = "white"
         self.selected_from: str | None = None
         self.selected_to: str | None = None
@@ -407,9 +618,9 @@ class PlayVsAIGUI(tk.Tk):
         # Indicadores de turno e confirmação do lance ficam ao lado do tabuleiro.
         self.lbl_turn = ttk.Label(
             right,
-            text="▶  Sua vez — clique numa peça BRANCA",
+            text="🛠️  MODO REPOR PEÇAS — Tabuleiro Vazio",
             font=("Arial", 11, "bold"),
-            foreground="#2e7d32"
+            foreground="#0277bd"
         )
         self.lbl_turn.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
@@ -430,7 +641,7 @@ class PlayVsAIGUI(tk.Tk):
                                  foreground="#1565c0", width=5)
         self.lbl_to.pack(side="left", padx=(4, 16))
 
-        self.lbl_hint = ttk.Label(move_panel, text="Clique numa peça branca para começar.",
+        self.lbl_hint = ttk.Label(move_panel, text="Clique numa casa para mover o robô ou em Habilitar para Jogar.",
                                    font=("Arial", 9), foreground="#546e7a",
                                    wraplength=285, justify="left")
         self.lbl_hint.pack(fill="x", pady=(4, 0))
@@ -452,27 +663,41 @@ class PlayVsAIGUI(tk.Tk):
         )
         self.btn_play.pack(fill="x", pady=(0, 5))
 
+        btn_sub_row = ttk.Frame(btn_row)
+        btn_sub_row.pack(fill="x")
+
         tk.Button(
-            btn_row,
+            btn_sub_row,
             text="✖ Limpar",
             bg="#546e7a", fg="#ffffff",
             activebackground="#37474f", activeforeground="#ffffff",
-            font=("Arial", 10, "bold"),
-            relief="raised", pady=5, padx=10,
+            font=("Arial", 9, "bold"),
+            relief="raised", pady=4, padx=4,
             command=self._clear_selection,
             cursor="hand2"
-        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
 
         tk.Button(
-            btn_row,
-            text="🔄 Nova Partida",
+            btn_sub_row,
+            text="🛠️ Repor Peças",
+            bg="#0277bd", fg="#ffffff",
+            activebackground="#01579b", activeforeground="#ffffff",
+            font=("Arial", 9, "bold"),
+            relief="raised", pady=4, padx=4,
+            command=self._enter_setup_mode,
+            cursor="hand2"
+        ).pack(side="left", fill="x", expand=True, padx=(2, 2))
+
+        tk.Button(
+            btn_sub_row,
+            text="🔄 Novo Jogo",
             bg="#1565c0", fg="#ffffff",
             activebackground="#0d47a1", activeforeground="#ffffff",
-            font=("Arial", 10, "bold"),
-            relief="raised", pady=5, padx=10,
+            font=("Arial", 9, "bold"),
+            relief="raised", pady=4, padx=4,
             command=self._new_game,
             cursor="hand2"
-        ).pack(side="right", fill="x", expand=True, padx=(4, 0))
+        ).pack(side="right", fill="x", expand=True, padx=(2, 0))
 
         # Status
         status_fr = ttk.LabelFrame(right, text=" Status ", padding=8)
@@ -487,42 +712,36 @@ class PlayVsAIGUI(tk.Tk):
                                         font=("Arial", 9), foreground="#546e7a")
         self.lbl_movecount.pack(anchor="w", pady=(4, 0))
 
-        # Legenda de cores
-        leg_fr = ttk.LabelFrame(right, text=" Legenda ", padding=6)
-        leg_fr.grid(row=3, column=0, sticky="ew", pady=(0, 6))
-
-        legends = [
-            (C_SEL,  "Casa selecionada (origem)"),
-            (C_DEST, "Destinos válidos do lance"),
-            (C_LAST, "Último lance jogado"),
-        ]
-        for color, text in legends:
-            row = ttk.Frame(leg_fr)
-            row.pack(fill="x", pady=1)
-            lbl_c = tk.Label(row, bg=color, width=3, relief="solid", bd=1)
-            lbl_c.pack(side="left", padx=(0, 6))
-            ttk.Label(row, text=text, font=("Arial", 9)).pack(side="left")
-
         # Conexão Dobot
         conn_fr = ttk.LabelFrame(right, text=" Braço Robótico (Dobot) ", padding=8)
-        conn_fr.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        conn_fr.grid(row=3, column=0, sticky="ew", pady=(0, 6))
         conn_fr.columnconfigure(1, weight=1)
 
-        ttk.Label(conn_fr, text="Porta:").grid(row=0, column=0, sticky="w", padx=(0, 4))
-        try:
-            import serial.tools.list_ports
-            ports = [p.device for p in serial.tools.list_ports.comports()] or ["COM5"]
-        except Exception:
-            ports = ["COM5"]
-        self.port_var = tk.StringVar(value=ports[0])
-        ttk.Combobox(conn_fr, textvariable=self.port_var, values=ports, width=8).grid(
-            row=0, column=1, sticky="ew", padx=(0, 4))
-        self.btn_connect = ttk.Button(conn_fr, text="Conectar", command=self._toggle_conn)
-        self.btn_connect.grid(row=0, column=2)
+        row_port = ttk.Frame(conn_fr)
+        row_port.grid(row=0, column=0, columnspan=3, sticky="ew")
+        row_port.columnconfigure(1, weight=1)
+
+        ttk.Label(row_port, text="Porta:").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        ports = find_dobot_ports()
+        arm_cfg = self.config.get("arms", {}).get(self.arm_color_var.get(), {})
+        default_port = arm_cfg.get("serial_port")
+        if not default_port or default_port not in ports:
+            default_port = ports[0] if ports else "COM3"
+        self.port_var = tk.StringVar(value=default_port)
+
+        self.cb_port = ttk.Combobox(row_port, textvariable=self.port_var, values=ports, width=8)
+        self.cb_port.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+
+        ttk.Button(row_port, text="🔄", width=3, command=self._refresh_ports).grid(
+            row=0, column=2, padx=(0, 4)
+        )
+
+        self.btn_connect = ttk.Button(row_port, text="Conectar", command=self._toggle_conn)
+        self.btn_connect.grid(row=0, column=3)
 
         ttk.Label(conn_fr, text="Braço:").grid(row=1, column=0, sticky="w", pady=(4, 0))
         cb_arm = ttk.Combobox(conn_fr, textvariable=self.arm_color_var,
-                               values=["white", "black"], state="readonly", width=8)
+                               values=["white"], state="disabled", width=8)
         cb_arm.grid(row=1, column=1, sticky="ew", pady=(4, 0))
         cb_arm.bind("<<ComboboxSelected>>", lambda e: self._load_coords())
 
@@ -535,6 +754,102 @@ class PlayVsAIGUI(tk.Tk):
                          variable=self.var_robot).grid(
             row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
+        # Repor Peças / Mover Robô
+        pos_fr = ttk.LabelFrame(right, text=" Repor Peças / Mover Robô ", padding=8)
+        pos_fr.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        pos_fr.columnconfigure(2, weight=1)
+
+        ttk.Label(pos_fr, text="Casa:").grid(row=0, column=0, sticky="w", padx=(0, 2))
+        ttk.Button(pos_fr, text="◀", width=3, command=self._prev_robot_sq).grid(row=0, column=1, padx=(0, 2))
+
+        sq_list = [_format_sq_display(PDN_TO_SQUARE[i]) for i in range(1, 33) if i in PDN_TO_SQUARE]
+        self.target_sq_var = tk.StringVar(value=sq_list[0] if sq_list else "A1")
+        self.cb_target_sq = ttk.Combobox(
+            pos_fr,
+            textvariable=self.target_sq_var,
+            values=sq_list,
+            state="readonly",
+            width=12
+        )
+        self.cb_target_sq.grid(row=0, column=2, sticky="ew", padx=(0, 2))
+        ttk.Button(pos_fr, text="▶", width=3, command=self._next_robot_sq).grid(row=0, column=3, padx=(2, 0))
+
+        self.btn_move_to_sq = tk.Button(
+            pos_fr,
+            text="📍 MOVER ROBÔ ATÉ A CASA",
+            bg="#0277bd", fg="#ffffff",
+            activebackground="#01579b", activeforeground="#ffffff",
+            font=("Arial", 10, "bold"),
+            relief="raised", pady=4,
+            command=self._move_robot_to_target_sq,
+            cursor="hand2"
+        )
+        self.btn_move_to_sq.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 4))
+
+        aux_row = ttk.Frame(pos_fr)
+        aux_row.grid(row=2, column=0, columnspan=4, sticky="ew")
+        aux_row.columnconfigure(0, weight=1)
+        aux_row.columnconfigure(1, weight=1)
+        aux_row.columnconfigure(2, weight=1)
+
+        ttk.Button(aux_row, text="⬆ Subir", command=self._lift_robot_arm).grid(row=0, column=0, sticky="ew", padx=1)
+        self.btn_pump = tk.Button(
+            aux_row,
+            text="💨 Ventosa",
+            bg="#eceff1",
+            activebackground="#b0bec5",
+            font=("Arial", 9),
+            relief="raised",
+            command=self._toggle_suction,
+            cursor="hand2"
+        )
+        self.btn_pump.grid(row=0, column=1, sticky="ew", padx=1)
+        ttk.Button(aux_row, text="🏠 Home", command=self._robot_home).grid(row=0, column=2, sticky="ew", padx=1)
+
+        setup_acts = ttk.Frame(pos_fr)
+        setup_acts.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        setup_acts.columnconfigure(0, weight=1)
+        setup_acts.columnconfigure(1, weight=1)
+        setup_acts.columnconfigure(2, weight=1)
+
+        ttk.Button(setup_acts, text="🗑️ Esvaziar", command=self._clear_board_for_setup).grid(row=0, column=0, sticky="ew", padx=1)
+        ttk.Button(setup_acts, text="♟ Peças Iniciais", command=self._fill_initial_pieces).grid(row=0, column=1, sticky="ew", padx=1)
+        ttk.Button(setup_acts, text="🗑️ Zerar Bandeja", command=self._reset_capture_count).grid(row=0, column=2, sticky="ew", padx=1)
+
+        self.btn_unlock = tk.Button(
+            pos_fr,
+            text="🚨 DESTRAVAR ROBÔ (LIMPAR ALARME)",
+            bg="#d32f2f", fg="#ffffff",
+            activebackground="#b71c1c", activeforeground="#ffffff",
+            font=("Arial", 9, "bold"),
+            relief="raised", pady=3,
+            command=self._clear_alarms_action,
+            cursor="hand2"
+        )
+        self.btn_unlock.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 2))
+
+        arm_cfg = self.config.get("arms", {}).get(self.arm_color_var.get(), {})
+        cz = float(arm_cfg.get("capture_z", 24.0))
+        self.lbl_tray_status = ttk.Label(
+            pos_fr,
+            text=f"Bandeja: {self.capture_stack_count} peças (Entrega Z = {cz:.1f} mm)",
+            font=("Arial", 9),
+            foreground="#2e7d32"
+        )
+        self.lbl_tray_status.grid(row=5, column=0, columnspan=4, sticky="w", pady=(3, 1))
+
+        self.btn_enable_play = tk.Button(
+            pos_fr,
+            text="🎮 HABILITAR PARA JOGAR",
+            bg="#2e7d32", fg="#ffffff",
+            activebackground="#1b5e20", activeforeground="#ffffff",
+            font=("Arial", 11, "bold"),
+            relief="raised", pady=5,
+            command=self._enable_play_mode,
+            cursor="hand2"
+        )
+        self.btn_enable_play.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+
         # Configuração IA
         ai_fr = ttk.LabelFrame(right, text=" I.A. ", padding=8)
         ai_fr.grid(row=5, column=0, sticky="ew", pady=(0, 6))  # painel de configuração da IA
@@ -546,6 +861,22 @@ class PlayVsAIGUI(tk.Tk):
             row=0, column=1, sticky="w", padx=(6, 0))
         ttk.Label(ai_fr, text="(1=fácil, 6=difícil)", font=("Arial", 8)).grid(
             row=0, column=2, padx=4)
+
+        # Legenda de cores
+        leg_fr = ttk.LabelFrame(right, text=" Legenda ", padding=6)
+        leg_fr.grid(row=6, column=0, sticky="ew", pady=(0, 6))
+
+        legends = [
+            (C_SEL,  "Casa selecionada (origem)"),
+            (C_DEST, "Destinos válidos do lance"),
+            (C_LAST, "Último lance jogado"),
+        ]
+        for color, text in legends:
+            row = ttk.Frame(leg_fr)
+            row.pack(fill="x", pady=1)
+            lbl_c = tk.Label(row, bg=color, width=3, relief="solid", bd=1)
+            lbl_c.pack(side="left", padx=(0, 6))
+            ttk.Label(row, text=text, font=("Arial", 9)).pack(side="left")
 
         right.bind("<Configure>", self._on_sidebar_resize)
 
@@ -654,9 +985,43 @@ class PlayVsAIGUI(tk.Tk):
         pm = self.board_state.piece_map()
         margin = max(5, self.cell_size // 9)
 
+        # Se estiver no modo setup com tabuleiro vazio, desenha marcações guias das posições iniciais
+        if self.mode == "setup" and not pm:
+            init_white = {"a1", "c1", "e1", "g1", "b2", "d2", "f2", "h2"}
+            init_black = {"a7", "c7", "e7", "g7", "b8", "d8", "f8", "h8"}
+            for sq in init_white:
+                x0, y0 = self._sq_to_xy(sq)
+                cx = x0 + self.cell_size // 2
+                cy = y0 + self.cell_size // 2
+                r = self.cell_size // 2 - margin
+                self.canvas.create_oval(
+                    cx - r, cy - r, cx + r, cy + r,
+                    outline="#ffffff", fill="", width=2, dash=(4, 4),
+                    tags=("piece", f"ghost_{sq}", sq)
+                )
+                self.canvas.create_text(
+                    cx, cy, text="Branca", font=("Arial", max(7, int(self.cell_size * 0.11)), "bold"),
+                    fill="#e0e0e0", tags=("piece", sq)
+                )
+            for sq in init_black:
+                x0, y0 = self._sq_to_xy(sq)
+                cx = x0 + self.cell_size // 2
+                cy = y0 + self.cell_size // 2
+                r = self.cell_size // 2 - margin
+                self.canvas.create_oval(
+                    cx - r, cy - r, cx + r, cy + r,
+                    outline="#222222", fill="#424242", width=2, dash=(4, 4),
+                    tags=("piece", f"ghost_{sq}", sq)
+                )
+                self.canvas.create_text(
+                    cx, cy, text="Preta", font=("Arial", max(7, int(self.cell_size * 0.11)), "bold"),
+                    fill="#cccccc", tags=("piece", sq)
+                )
+            return
+
         # Casas de origem do jogador da vez (para destacar com borda)
         is_human_turn = (self.board_state.turn_name == self.human_color
-                         and not self.game_over and not self.ai_thinking)
+                         and not self.game_over and not self.ai_thinking and self.mode == "play")
         human_origins = self._all_legal_origins() if is_human_turn else set()
 
         # Determina quais casas têm peças do humano vs IA.
@@ -739,20 +1104,22 @@ class PlayVsAIGUI(tk.Tk):
 
     def _refresh_colors(self):
         """Atualiza as cores de todas as casas de acordo com o estado atual."""
-        pm = self.board_state.piece_map()
+        target_sq = self._get_selected_robot_sq()
 
         for sq in DRAUGHTS_SQUARES:
-            # Cor base
-            if sq == self.selected_from:
-                fill = C_SEL
-            elif sq == self.selected_to:
-                fill = C_DEST
-            elif sq in self.valid_dests:
-                fill = C_DEST
-            elif sq in self.last_move_sqs:
-                fill = C_LAST
+            if self.mode == "setup":
+                fill = C_SEL if sq == target_sq else C_DARK
             else:
-                fill = C_DARK
+                if sq == self.selected_from:
+                    fill = C_SEL
+                elif sq == self.selected_to:
+                    fill = C_DEST
+                elif sq in self.valid_dests:
+                    fill = C_DEST
+                elif sq in self.last_move_sqs:
+                    fill = C_LAST
+                else:
+                    fill = C_DARK
             self._color_sq(sq, fill)
 
         # Casas claras permanecem claras
@@ -765,13 +1132,27 @@ class PlayVsAIGUI(tk.Tk):
     # ─── Eventos do Canvas ────────────────────────────────────────────────────
 
     def _on_canvas_click(self, event: tk.Event):
-        if self.game_over or self.ai_thinking or self.robot_busy:
-            return
-        if self.board_state.turn_name != self.human_color:
+        if self.ai_thinking or self.robot_busy:
             return
 
         sq = self._xy_to_sq(event.x, event.y)
         if sq is None or not self._is_playable(sq):
+            return
+
+        self._set_robot_target_sq(sq)
+
+        # Se estiver no modo setup / repor peças:
+        if self.mode == "setup":
+            self._refresh_colors()
+            pdn = SQUARE_TO_PDN.get(sq, 0)
+            self.lbl_hint.config(
+                text=f"Casa {sq.upper()} (PDN {pdn}) selecionada. Clique em 'MOVER ROBÔ ATÉ A CASA' para posicionar a peça."
+            )
+            return
+
+        if self.game_over:
+            return
+        if self.board_state.turn_name != self.human_color:
             return
 
         # Casas com peças do jogador atual (obtidas dos lances legais)
@@ -823,6 +1204,8 @@ class PlayVsAIGUI(tk.Tk):
             )
 
     def _on_canvas_hover(self, event: tk.Event):
+        if self.mode == "setup":
+            return
         sq = self._xy_to_sq(event.x, event.y)
         if sq == self._hover_sq:
             return
@@ -951,7 +1334,7 @@ class PlayVsAIGUI(tk.Tk):
 
                 self.after(0, self._after_human)
             except Exception as exc:
-                self.after(0, lambda e=str(exc): messagebox.showerror("Erro", e))
+                self.after(0, lambda e=str(exc): self._show_error_alert("Erro no movimento do braço", e))
                 self.after(0, self._on_human_move_failed)
 
         threading.Thread(target=_thread, daemon=True).start()
@@ -967,7 +1350,8 @@ class PlayVsAIGUI(tk.Tk):
         self._draw_pieces()
         self._update_movecount()
 
-        if self.board_state.is_game_over():
+        # Vitória somente quando todas as peças do adversário foram capturadas
+        if self._check_capture_win() is not None:
             self._announce_winner()
             return
 
@@ -1025,12 +1409,29 @@ class PlayVsAIGUI(tk.Tk):
         self.ai_thinking = False
         self.robot_busy = False
         self.game_over = True
-        msg = f"A I.A. perdeu por erro durante a jogada.\n\n{reason}"
-        self.lbl_turn.config(text="I.A. perdeu por erro", foreground="#2e7d32")
-        self.lbl_status.config(text="Vitória do jogador — erro da I.A.", foreground="#2e7d32")
+        msg = (
+            f"Ocorreu um erro durante a jogada da I.A.:\n\n{reason}\n\n"
+            "O jogo foi pausado para evitar movimentos incorretos.\n"
+            "Você pode clicar em 'Repor Peças' para reorganizar o tabuleiro ou em 'Novo Jogo'."
+        )
+        self.lbl_turn.config(text="Erro durante jogada da I.A.", foreground="#d32f2f")
+        self.lbl_status.config(text=f"Erro da I.A.: {reason}", foreground="#d32f2f")
         self._set_locked(False)
-        self._log(msg, "win")
-        messagebox.showerror("Vitória do jogador", msg)
+        self._log(msg, "error")
+        self._show_error_alert("Erro na jogada da IA", msg)
+
+    def _show_error_alert(self, title: str, reason: str):
+        """Mostra a falha na janela e no console, mesmo quando veio de uma thread."""
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda: self._show_error_alert(title, reason))
+            return
+        try:
+            self.lbl_status.config(text=f"ERRO: {reason}", foreground="#d32f2f")
+            self.lbl_turn.config(text="Falha no movimento do robô", foreground="#d32f2f")
+        except Exception:
+            pass
+        print(f"[{title}] {reason}", file=sys.stderr, flush=True)
+        messagebox.showerror(title, reason, parent=self)
 
     def _after_ai(self):
         self.ai_thinking = False
@@ -1039,7 +1440,8 @@ class PlayVsAIGUI(tk.Tk):
         self._update_movecount()
         self._set_locked(False)
 
-        if self.board_state.is_game_over():
+        # Vitória somente quando todas as peças do adversário foram capturadas
+        if self._check_capture_win() is not None:
             self._announce_winner()
             return
 
@@ -1082,23 +1484,49 @@ class PlayVsAIGUI(tk.Tk):
     def _update_movecount(self):
         self.lbl_movecount.config(text=f"Lances: {self.move_count}")
 
+    def _check_capture_win(self) -> str | None:
+        """Retorna 'human', 'ai', ou None.
+
+        Só declara vencedor quando UM jogador capturou TODAS as peças do
+        adversário. Erros do braço, ausência de lances legais e outros
+        estados de jogo NÃO acionam esta função.
+        """
+        if self.mode != "play":
+            return None
+
+        pm = self.board_state.piece_map()
+        white_count = sum(1 for sym in pm.values() if sym.lower() == "w")
+        black_count = sum(1 for sym in pm.values() if sym.lower() == "b")
+
+        # O Humano joga com as Brancas ('w') e a I.A. joga com as Pretas ('b')
+        if black_count == 0 and white_count > 0:
+            return "human"
+
+        if white_count == 0 and black_count > 0:
+            return "ai"
+
+        return None  # Jogo ainda em andamento
+
     def _announce_winner(self):
+        winner = self._check_capture_win()
+        if winner is None:
+            # Nenhuma peça foi completamente capturada — não anuncia.
+            return
+
         self.game_over = True
-        outcome = self.board_state.outcome()
-        if outcome == "white":
-            msg = "AS BRANCAS VENCERAM! Parabéns!"
+
+        if winner == "human":
+            msg = "🏆 VOCÊ VENCEU!\nVocê capturou todas as peças da I.A.!"
             fg = "#2e7d32"
-        elif outcome == "black":
-            msg = "🤖 AS PRETAS (I.A.) VENCERAM!"
-            fg = "#c62828"
         else:
-            msg = "EMPATE!"
-            fg = "#e65100"
+            msg = "😔 VOCÊ PERDEU!\nA I.A. capturou todas as suas peças."
+            fg = "#c62828"
+
         self.lbl_turn.config(text=msg, foreground=fg)
         self.lbl_status.config(text=msg, foreground=fg)
-        self._log(f"\n{'='*28}", "info")
+        self._log(f"\n{'='*30}", "info")
         self._log(msg, "win")
-        self._log(f"{'='*28}", "info")
+        self._log(f"{'='*30}", "info")
         messagebox.showinfo("Fim de Jogo", msg)
 
     def _new_game(self):
@@ -1106,6 +1534,7 @@ class PlayVsAIGUI(tk.Tk):
             if not messagebox.askyesno("Nova partida",
                                         "Um lance está em progresso. Deseja reiniciar mesmo assim?"):
                 return
+        self.mode = "play"
         self.board_state = BoardState(INITIAL_POSITION)
         self.selected_from = None
         self.selected_to = None
@@ -1116,16 +1545,21 @@ class PlayVsAIGUI(tk.Tk):
         self.robot_busy = False
         self.move_count = 0
 
+        self._reset_capture_count_silent()
+
         self.lbl_from.config(text=" —— ")
         self.lbl_to.config(text=" —— ")
         self.lbl_hint.config(text="Clique numa peça branca para começar.")
         self.btn_play.config(state="disabled")
         self.lbl_turn.config(text="▶  Sua vez — clique numa peça BRANCA", foreground="#2e7d32")
         self.lbl_movecount.config(text="Lances: 0")
+        if hasattr(self, "btn_enable_play"):
+            self.btn_enable_play.config(state="disabled", text="✔ Jogo Habilitado", bg="#78909c")
 
         self._draw_board()
         self._draw_pieces()
         self._update_status()
+        self._refresh_colors()
         self._log("=== Nova Partida ===", "info")
         self._log("Você joga com as BRANCAS.", "white")
         self._log("I.A. joga com as PRETAS.", "black")
@@ -1137,6 +1571,13 @@ class PlayVsAIGUI(tk.Tk):
         return
 
     # ─── Conexão Dobot ────────────────────────────────────────────────────────
+
+    def _refresh_ports(self):
+        ports = find_dobot_ports()
+        if hasattr(self, "cb_port"):
+            self.cb_port.config(values=ports)
+            if self.port_var.get() not in ports and ports:
+                self.port_var.set(ports[0])
 
     def _toggle_conn(self):
         if self.is_connected:
@@ -1208,6 +1649,7 @@ class PlayVsAIGUI(tk.Tk):
             os.replace(tmp_path, self.config_path)
             tmp_path = None
             self.after(0, lambda n=count: self._log(f"Capturadas empilhadas: {n}", "robot"))
+            self.after(0, self._refresh_capture_status)
         except Exception as exc:
             self.after(0, lambda e=str(exc): self._log(f"Erro ao salvar contagem da bandeja: {e}", "robot"))
         finally:
@@ -1220,6 +1662,9 @@ class PlayVsAIGUI(tk.Tk):
     def _on_connected(self):
         self.lbl_conn.config(text=f"Conectado ({self.port_var.get()})", foreground="#2e7d32")
         self.btn_connect.config(state="normal", text="Desconectar")
+        if hasattr(self, "btn_pump"):
+            self.btn_pump.config(text="💨 Ventosa", bg="#eceff1", relief="raised")
+        self._refresh_capture_status()
         self._log(f"🔗 Braço conectado em {self.port_var.get()}", "robot")
 
     def _on_conn_fail(self, err: str):
@@ -1228,6 +1673,8 @@ class PlayVsAIGUI(tk.Tk):
         self.executor = None
         self.lbl_conn.config(text="Falha na conexão", foreground="#d32f2f")
         self.btn_connect.config(state="normal", text="Conectar")
+        if hasattr(self, "btn_pump"):
+            self.btn_pump.config(text="💨 Ventosa", bg="#eceff1", relief="raised")
         messagebox.showerror("Erro de Conexão", f"Não foi possível conectar:\n{err}")
 
     def _disconnect(self):
@@ -1241,7 +1688,280 @@ class PlayVsAIGUI(tk.Tk):
         self.is_connected = False
         self.lbl_conn.config(text="Desconectado", foreground="#d32f2f")
         self.btn_connect.config(text="Conectar")
+        if hasattr(self, "btn_pump"):
+            self.btn_pump.config(text="💨 Ventosa", bg="#eceff1", relief="raised")
         self._log("🔌 Braço desconectado.", "robot")
+
+    # ─── Reposição de Peças e Movimento Manual do Robô ─────────────────────────
+
+    def _enter_setup_mode(self):
+        if self.ai_thinking or self.robot_busy:
+            if not messagebox.askyesno("Modo Reposição", "Uma ação está em andamento. Entrar no modo de reposição mesmo assim?"):
+                return
+        self.mode = "setup"
+        self.game_over = False
+        self.ai_thinking = False
+        self.robot_busy = False
+        self.selected_from = None
+        self.selected_to = None
+        self.valid_dests = set()
+        self.last_move_sqs = []
+
+        # Esvazia o tabuleiro para montagem
+        self.board_state = BoardState("W:W:B")
+        self.lbl_turn.config(
+            text="🛠️  MODO REPOR PEÇAS — Tabuleiro Vazio",
+            foreground="#0277bd"
+        )
+        self.lbl_status.config(
+            text="Modo Reposição: Selecione as casas e mova o robô para colocar as peças. Quando terminar, clique em 'Habilitar para Jogar'.",
+            foreground="#0277bd"
+        )
+        self.lbl_from.config(text=" —— ")
+        self.lbl_to.config(text=" —— ")
+        self.lbl_hint.config(text="Clique em qualquer casa para enviar o robô até ela.")
+        self.btn_play.config(state="disabled")
+        if hasattr(self, "btn_enable_play"):
+            self.btn_enable_play.config(state="normal", text="🎮 HABILITAR PARA JOGAR", bg="#2e7d32")
+
+        self._draw_board()
+        self._draw_pieces()
+        self._refresh_colors()
+        self._log("🛠️ Modo Repor Peças ativado (tabuleiro vazio).", "info")
+
+    def _enable_play_mode(self):
+        if self.ai_thinking or self.robot_busy:
+            return
+
+        # Se o tabuleiro estiver vazio, preenche com as peças da posição inicial
+        if not self.board_state.piece_map():
+            self.board_state = BoardState(INITIAL_POSITION)
+
+        self.mode = "play"
+        self.game_over = False
+        self.ai_thinking = False
+        self.robot_busy = False
+        self.move_count = 0
+        self.selected_from = None
+        self.selected_to = None
+        self.valid_dests = set()
+        self.last_move_sqs = []
+
+        # Zera contagem da bandeja de captura
+        self._reset_capture_count_silent()
+
+        self.lbl_turn.config(text="▶  Sua vez — clique numa peça BRANCA", foreground="#2e7d32")
+        self.lbl_movecount.config(text="Lances: 0")
+        self.lbl_hint.config(text="Clique numa peça branca para começar.")
+        self.btn_play.config(state="disabled")
+        if hasattr(self, "btn_enable_play"):
+            self.btn_enable_play.config(state="disabled", text="✔ Jogo Habilitado", bg="#78909c")
+
+        self._draw_board()
+        self._draw_pieces()
+        self._update_status()
+        self._refresh_colors()
+        self._log("=== Partida Iniciada ===", "info")
+        messagebox.showinfo("Jogo Habilitado", "O tabuleiro está pronto e a partida começou!\nVocê joga com as peças BRANCAS.")
+
+    def _clear_board_for_setup(self):
+        self._enter_setup_mode()
+
+    def _fill_initial_pieces(self):
+        self.board_state = BoardState(INITIAL_POSITION)
+        self._draw_board()
+        self._draw_pieces()
+        self._refresh_colors()
+        self.lbl_hint.config(text="Peças iniciais posicionadas. Clique em 'HABILITAR PARA JOGAR' para começar.")
+        self._log("Posição inicial carregada no tabuleiro.", "info")
+
+    def _reset_capture_count(self):
+        color = self.arm_color_var.get()
+        self.capture_stack_count = 0
+        if self.executor:
+            self.executor.capture_count = 0
+        self._update_capture_stack_count(color, 0)
+        self._refresh_capture_status()
+        self._log("🗑️ Bandeja de capturas zerada (contagem = 0, Z na altura calibrada).", "robot")
+        messagebox.showinfo(
+            "Bandeja Zerada",
+            "Contagem de peças capturadas zerada com sucesso!\n"
+            "A entrega voltará a ser feita exatamente na altura calibrada da bandeja."
+        )
+
+    def _reset_capture_count_silent(self):
+        color = self.arm_color_var.get()
+        self.capture_stack_count = 0
+        if self.executor:
+            self.executor.capture_count = 0
+        self._update_capture_stack_count(color, 0)
+        self._refresh_capture_status()
+
+    def _refresh_capture_status(self):
+        count = self.capture_stack_count
+        arm_cfg = self.config.get("arms", {}).get(self.arm_color_var.get(), {})
+        cz = float(arm_cfg.get("capture_z", 24.0))
+        step = float(arm_cfg.get("capture_stack_step_mm", 5.0))
+        current_z = cz + count * step
+        if hasattr(self, "lbl_tray_status"):
+            self.lbl_tray_status.config(
+                text=f"Bandeja: {count} peças capturadas (Entrega Z = {current_z:.1f} mm)",
+                foreground="#2e7d32" if count < 10 else "#e65100"
+            )
+
+    def _get_selected_robot_sq(self) -> str:
+        text = self.target_sq_var.get() if hasattr(self, "target_sq_var") else ""
+        return _parse_sq_display(text)
+
+    def _set_robot_target_sq(self, sq: str):
+        if hasattr(self, "target_sq_var"):
+            disp = _format_sq_display(sq)
+            self.target_sq_var.set(disp)
+
+    def _prev_robot_sq(self):
+        cur = self._get_selected_robot_sq()
+        pdn = SQUARE_TO_PDN.get(cur, 1)
+        prev_pdn = 32 if pdn <= 1 else pdn - 1
+        sq = PDN_TO_SQUARE.get(prev_pdn, "a1")
+        self._set_robot_target_sq(sq)
+
+    def _next_robot_sq(self):
+        cur = self._get_selected_robot_sq()
+        pdn = SQUARE_TO_PDN.get(cur, 1)
+        next_pdn = 1 if pdn >= 32 else pdn + 1
+        sq = PDN_TO_SQUARE.get(next_pdn, "a1")
+        self._set_robot_target_sq(sq)
+
+    def _move_robot_to_target_sq(self):
+        if not self.is_connected or not self.worker:
+            messagebox.showwarning("Aviso", "Conecte o braço robótico (Dobot) antes de mover!")
+            return
+        if self.robot_busy or self.ai_thinking:
+            messagebox.showwarning("Aviso", "O robô já está ocupado executando uma ação. Aguarde a finalização!")
+            return
+
+        sq = self._get_selected_robot_sq()
+        if not sq or sq not in self.square_coords:
+            messagebox.showinfo(
+                "Casa sem Coordenada",
+                f"A casa {sq.upper()} ainda não possui coordenadas calibradas em config/default.yaml!"
+            )
+            return
+
+        target = self.square_coords[sq]
+        arm_cfg = self.config.get("arms", {}).get(self.arm_color_var.get(), {})
+        travel_z = float(arm_cfg.get("travel_z", 80.0))
+        safe_z = max(travel_z, float(target["z"]) + 35.0, 60.0)
+
+        self.robot_busy = True
+        self.btn_move_to_sq.config(state="disabled")
+        self.lbl_status.config(text=f"Robô movendo até a casa {sq.upper()}...", foreground="#1565c0")
+        self._log(f"🤖 Movendo até a casa {sq.upper()} (X={target['x']:.1f}, Y={target['y']:.1f}, Z={target['z']:.1f})", "robot")
+
+        def _do_move():
+            try:
+                # 1. Se estiver baixo, sobe verticalmente primeiro
+                cur = self.worker.get_pose()
+                if cur[2] < safe_z - 10.0:
+                    self.worker.move_to(cur[0], cur[1], safe_z, cur[3], joint=True)
+                # 2. Deslocamento na altura segura até sobre a casa
+                self.worker.move_to(target["x"], target["y"], safe_z, target.get("r", 0.0), joint=True)
+                # 3. Pré-aproximação (18 mm acima da peça)
+                z_pre = float(target["z"]) + 18.0
+                self.worker.move_to(target["x"], target["y"], z_pre, target.get("r", 0.0), joint=True)
+                # 4. Descida vertical final em linha reta (MOVL)
+                self.worker.move_to(target["x"], target["y"], target["z"], target.get("r", 0.0), joint=False)
+                self.after(0, lambda: self._log(f"✅ Robô posicionado na casa {sq.upper()}", "robot"))
+            except Exception as e:
+                self.after(0, lambda err=str(e): messagebox.showerror("Erro de Movimento", f"Falha ao mover o robô:\n{err}"))
+            finally:
+                self.robot_busy = False
+                self.after(0, lambda: self.btn_move_to_sq.config(state="normal"))
+                self.after(0, self._update_status)
+
+        threading.Thread(target=_do_move, daemon=True).start()
+
+    def _lift_robot_arm(self):
+        if not self.is_connected or not self.worker:
+            messagebox.showwarning("Aviso", "Conecte o braço robótico (Dobot) antes de mover!")
+            return
+        if self.robot_busy or self.ai_thinking:
+            return
+
+        arm_cfg = self.config.get("arms", {}).get(self.arm_color_var.get(), {})
+        travel_z = float(arm_cfg.get("travel_z", 80.0))
+
+        self.robot_busy = True
+        self.lbl_status.config(text="Subindo braço para altura segura...", foreground="#1565c0")
+
+        def _do_lift():
+            try:
+                pose = self.worker.get_pose()
+                target_z = max(travel_z, pose[2] + 40.0, 60.0)
+                self.worker.move_to(pose[0], pose[1], target_z, pose[3], joint=True)
+                self.after(0, lambda: self._log(f"⬆ Braço elevado para Z={target_z:.1f} mm", "robot"))
+            except Exception as e:
+                self.after(0, lambda err=str(e): messagebox.showerror("Erro", str(err)))
+            finally:
+                self.robot_busy = False
+                self.after(0, self._update_status)
+
+        threading.Thread(target=_do_lift, daemon=True).start()
+
+    def _toggle_suction(self):
+        if not self.is_connected or not self.worker:
+            messagebox.showwarning("Aviso", "Conecte o braço robótico (Dobot) antes de acionar a ventosa!")
+            return
+        try:
+            new_state = not getattr(self.worker, "sucking", False)
+            self.worker.set_suction(new_state)
+            if hasattr(self, "btn_pump"):
+                self.btn_pump.config(
+                    text="💨 Ventosa: ON" if new_state else "💨 Ventosa",
+                    bg="#81c784" if new_state else "#eceff1",
+                    relief="sunken" if new_state else "raised"
+                )
+            self._log(f"Ventosa {'LIGADA' if new_state else 'DESLIGADA'}", "robot")
+        except Exception as e:
+            messagebox.showerror("Erro Ventosa", str(e))
+
+    def _robot_home(self):
+        if not self.is_connected or not self.worker:
+            messagebox.showwarning("Aviso", "Conecte o braço robótico (Dobot) primeiro!")
+            return
+        if self.robot_busy or self.ai_thinking:
+            return
+
+        self.robot_busy = True
+        self.lbl_status.config(text="Robô indo para posição Home...", foreground="#1565c0")
+
+        def _do_home():
+            try:
+                self.worker.home()
+                self.after(0, lambda: self._log("🏠 Braço retornou à posição Home.", "robot"))
+            except Exception as e:
+                self.after(0, lambda err=str(e): messagebox.showerror("Erro Home", str(err)))
+            finally:
+                self.robot_busy = False
+                self.after(0, self._update_status)
+
+        threading.Thread(target=_do_home, daemon=True).start()
+
+    def _clear_alarms_action(self):
+        if not self.is_connected or not self.worker:
+            messagebox.showwarning("Aviso", "Conecte o braço robótico (Dobot) primeiro!")
+            return
+        try:
+            self.worker.clear_alarms()
+            self.robot_busy = False
+            self.lbl_status.config(text="Alarmes limpos! O braço foi destravado com sucesso.", foreground="#2e7d32")
+            messagebox.showinfo(
+                "Robô Destravado",
+                "Os alarmes do Dobot foram limpos e a fila foi reiniciada com sucesso!\n"
+                "Você pode continuar o jogo ou reposicionar o braço."
+            )
+        except Exception as e:
+            messagebox.showerror("Erro ao Destravar", f"Falha ao limpar alarmes do robô:\n{e}")
 
     def _on_close(self):
         if (self.robot_busy or self.ai_thinking):
@@ -1258,7 +1978,8 @@ def main():
         description="Damas Brasileiras — Humano vs I.A. com braço robótico."
     )
     parser.add_argument("--config", default=None)
-    parser.add_argument("--arm", default="white", choices=["white", "black"])
+    parser.add_argument("--arm", default="white", choices=["white"],
+                        help="Braço físico disponível: branco (COM3).")
     args = parser.parse_args()
     app = PlayVsAIGUI(config_path=args.config, arm_color=args.arm)
     app.mainloop()

@@ -55,8 +55,6 @@ async def cmd_play(args) -> None:
         config.setdefault("match", {})["max_moves"] = args.max_moves
     if getattr(args, "white_port", None):
         config.setdefault("arms", {}).setdefault("white", {})["serial_port"] = args.white_port
-    if getattr(args, "black_port", None):
-        config.setdefault("arms", {}).setdefault("black", {})["serial_port"] = args.black_port
     if getattr(args, "camera", None) is not None:
         config.setdefault("vision", {})["camera_index"] = args.camera
 
@@ -99,9 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     play.add_argument("--max-moves", type=int, default=None,
                       help="Limite de lances (meios-lances). 0 = sem limite.")
     play.add_argument("--white-port", default=None,
-                      help="Porta serial do braco branco (ex: COM5)")
-    play.add_argument("--black-port", default=None,
-                      help="Porta serial do braco preto (ex: COM4)")
+                      help="Porta serial do braço branco (default: COM3).")
     play.add_argument("--calibration", default=None,
                       help="Caminho para o YAML de calibracao (camera + coordenadas).")
     play.set_defaults(func=cmd_play)
@@ -112,8 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     play_gui.add_argument("--config", default=None,
                           help="Caminho para o YAML de configuracao.")
-    play_gui.add_argument("--arm", default="white", choices=["white", "black"],
-                          help="Braço robótico a usar para executar os lances (default: white).")
+    play_gui.add_argument("--arm", default="white", choices=["white"],
+                          help="Braço físico disponível: branco (COM3).")
     play_gui.set_defaults(func=cmd_play_gui)
 
     setup = sub.add_parser("setup_arms", help="Abre a interface de configuracao manual dos bracos.")
